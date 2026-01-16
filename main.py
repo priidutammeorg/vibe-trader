@@ -4,93 +4,103 @@ from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
+from openai import OpenAI  # <--- UUS AJU
 
-# 1. SEADISTUS JA VÕTMED
+# 1. SEADISTUS
 load_dotenv()
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
+openai_key = os.getenv("OPENAI_API_KEY") # <--- Loeme OpenAI võtme
 
-if not api_key or not secret_key:
-    print("VIGA: Võtmeid ei leitud .env failist!")
+if not api_key or not secret_key or not openai_key:
+    print("VIGA: Mõni võti on puudu .env failist!")
     exit()
 
-print("--- VIBE TRADER: INTELLIGENT MODE ---")
+print("--- VIBE TRADER: AI POWERED ---")
 
-# Ühendame Alpacaga (Paper Trading)
+# Ühendused
 trading_client = TradingClient(api_key, secret_key, paper=True)
+ai_client = OpenAI(api_key=openai_key)
 
-# 2. LUGEJA (Reader) - Hangib uudiseid
+# 2. LUGEJA (Reader)
 def get_latest_news(symbol="BTC-USD"):
     print(f"\n1. LUGEJA: Otsin uudiseid sümbolile {symbol}...")
     try:
         ticker = yf.Ticker(symbol)
         news_list = ticker.news
-        
         if not news_list:
-            print("   - Hetkel uudiseid ei leitud (Yahoo API piirang või vaikus).")
+            print("   - Uudiseid ei leitud.")
             return []
-        
-        print(f"   - Leidsin {len(news_list)} värsket uudist.")
-        return news_list
+        # Võtame viimased 3 uudist, et mitte liiga palju raha kulutada
+        return news_list[:3] 
     except Exception as e:
-        print(f"   - Viga uudiste lugemisel: {e}")
+        print(f"   - Viga uudistega: {e}")
         return []
 
-# 3. ANALÜÜTIK (Brain) - Otsustab
-def analyze_sentiment(news_list):
-    print("\n2. ANALÜÜTIK: Analüüsin pealkirju...")
+# 3. ANALÜÜTIK (The AI Brain)
+def analyze_with_gpt(news_list):
+    print("\n2. AI ANALÜÜTIK: Saadan uudised GPT-le analüüsimiseks...")
     
-    # Lihtne "AI" - positiivsed märksõnad (inglise keeles, sest uudised on inglise k.)
-    positive_keywords = ["soars", "surge", "jump", "record", "bull", "high", "etf", "approval", "gains"]
-    score = 0
-    
+    # Valmistame uudised ette tekstina
+    news_text = ""
     for article in news_list:
-        title = article.get('title', '').lower()
-        # Kontrollime, kas pealkirjas on häid sõnu
-        for word in positive_keywords:
-            if word in title:
-                print(f"   + POSITIIVNE LEID: '{word}' pealkirjas: {article['title']}")
-                score += 1
+        news_text += f"- Pealkiri: {article['title']}\n"
+
+    print(f"   - Analüüsin {len(news_list)} artiklit...")
+
+    # See on prompt (käsklus) AI-le
+    prompt = f"""
+    Oled kogenud krüptovaluuta kaupleja. Sinu ülesanne on analüüsida neid uudiste pealkirju Bitcoini kohta:
     
-    print(f"   - Kokkuvõte: Positiivse skoor on {score}")
+    {news_text}
     
-    # OTSUS: Kui leidsime vähemalt ühe väga hea uudise, siis ostame
-    if score >= 1:
-        return "BUY"
-    else:
+    Hinda nende mõju hinnale. Vasta AINULT ühe sõnaga:
+    - BUY (kui uudised on selgelt väga positiivsed)
+    - SELL (kui uudised on halvad)
+    - WAIT (kui on neutraalne või ebaselge)
+    """
+
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini", # Kasutame kiiret ja odavat mudelit
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        decision = response.choices[0].message.content.strip()
+        print(f"   - AI VASTUS: {decision}")
+        return decision
+        
+    except Exception as e:
+        print(f"   - AI Viga: {e}")
         return "WAIT"
 
-# 4. TEGIJA (Trader) - Teeb tehingu
+# 4. TEGIJA (Trader)
 def execute_trade(decision):
-    print(f"\n3. TEGIJA: Otsus on {decision}")
+    print(f"\n3. TEGIJA: Tegevus -> {decision}")
     
     if decision == "BUY":
-        account = trading_client.get_account()
-        buying_power = float(account.buying_power)
-        
-        if buying_power < 100:
-            print("   - Raha on otsas, ei saa osta.")
-            return
-
-        print("   -> ALUSTAN OSTU: Ostame $50 eest Bitcoini.")
-        # Teeme $50 suuruse ostu (Notional - ostame summa, mitte koguse järgi)
+        print("   -> AI andis rohelise tule! Ostame $50 eest.")
         try:
             market_order_data = MarketOrderRequest(
                 symbol="BTC/USD",
-                notional=50,  # Ostame 50 dollari eest
+                notional=50,
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.GTC
             )
-            order = trading_client.submit_order(order_data=market_order_data)
-            print(f"   -> TEHTUD! Orderi ID: {order.id}")
+            trading_client.submit_order(order_data=market_order_data)
+            print("   -> OST SOORITATUD!")
         except Exception as e:
-            print(f"   -> VIGA ostmisel: {e}")
+            print(f"   -> Viga ostmisel: {e}")
             
+    elif decision == "SELL":
+        print("   -> AI soovitab müüa (aga praegu meil pole loogikat müügiks, seega ootame).")
     else:
-        print("   -> Praegu ei osta. Ootan paremaid uudiseid.")
+        print("   -> AI soovitab oodata. Turg on ebaselge.")
 
-# --- PÕHIPROTSESS ---
-# See paneb kõik tükid tööle
+# --- KÄIVITUS ---
 uudised = get_latest_news("BTC-USD")
-otsus = analyze_sentiment(uudised)
-execute_trade(otsus)
+if uudised:
+    otsus = analyze_with_gpt(uudised)
+    execute_trade(otsus)
+else:
+    print("Ei saanud uudiseid, ei saa analüüsida.")
