@@ -16,18 +16,16 @@ if not api_key or not secret_key:
     print("VIGA: Alpaca võtmed on puudu!")
     exit()
 
-if not openai_key:
-    print("HOIATUS: OpenAI võti puudub. Kasutan ainult lokaalset loogikat (kui oleks).")
-    # Siin peaks tegelikult exit() tegema, kui tahame ainult AI-d
-    
 print("--- VIBE TRADER: AI POWERED (FIXED) ---")
 
 # Ühendused
 trading_client = TradingClient(api_key, secret_key, paper=True)
-# Kontrollime, kas OpenAI võti on olemas enne kliendi loomist
+
 ai_client = None
 if openai_key:
     ai_client = OpenAI(api_key=openai_key)
+else:
+    print("HOIATUS: OpenAI võti puudub. AI funktsionaalsus on piiratud.")
 
 # 2. LUGEJA (Reader)
 def get_latest_news(symbol="BTC-USD"):
@@ -41,7 +39,6 @@ def get_latest_news(symbol="BTC-USD"):
             return []
         
         print(f"   - Leidsin {len(news_list)} uudist.")
-        # Võtame viimased 3
         return news_list[:3] 
     except Exception as e:
         print(f"   - Viga uudistega: {e}")
@@ -56,6 +53,65 @@ def analyze_with_gpt(news_list):
     print("\n2. AI ANALÜÜTIK: Saadan uudised GPT-le analüüsimiseks...")
     
     news_text = ""
+    # SIIN OLI VIGA ENNE - JÄLGI TAANET!
     for i, article in enumerate(news_list):
-        # --- PARANDUS: Kasutame .get(), et vältida KeyError viga ---
-        # Mõnikord on
+        # Kasutame .get(), et vältida KeyError viga
+        title = article.get('title', article.get('headline', 'Pealkiri puudub'))
+        
+        # Debug info esimese artikli kohta
+        if i == 0:
+            print(f"   [DEBUG] Esimene uudis sisaldab võtmeid: {list(article.keys())}")
+            
+        news_text += f"- Uudis {i+1}: {title}\n"
+
+    print(f"   - Saadan AI-le info:\n{news_text}")
+
+    prompt = f"""
+    Oled kogenud krüptovaluuta kaupleja. Analüüsi neid pealkirju:
+    {news_text}
+    
+    Hinda mõju hinnale. Vasta AINULT ühe sõnaga:
+    - BUY (kui uudised on väga head)
+    - SELL (kui uudised on halvad)
+    - WAIT (kui neutraalne)
+    """
+
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        decision = response.choices[0].message.content.strip()
+        print(f"   - AI VASTUS: {decision}")
+        return decision
+    except Exception as e:
+        print(f"   - AI Viga: {e}")
+        return "WAIT"
+
+# 4. TEGIJA (Trader)
+def execute_trade(decision):
+    print(f"\n3. TEGIJA: Tegevus -> {decision}")
+    
+    if decision == "BUY":
+        print("   -> AI andis rohelise tule! Ostame $50 eest.")
+        try:
+            market_order_data = MarketOrderRequest(
+                symbol="BTC/USD",
+                notional=50,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.GTC
+            )
+            trading_client.submit_order(order_data=market_order_data)
+            print("   -> OST SOORITATUD!")
+        except Exception as e:
+            print(f"   -> Viga ostmisel: {e}")
+    else:
+        print("   -> Tehingut ei toimu.")
+
+# --- KÄIVITUS ---
+uudised = get_latest_news("BTC-USD")
+if uudised:
+    otsus = analyze_with_gpt(uudised)
+    execute_trade(otsus)
+else:
+    print("Ei saanud uudiseid.")
