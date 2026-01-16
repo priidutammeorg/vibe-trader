@@ -19,33 +19,32 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu (.env)!")
     exit()
 
-print("--- VIBE TRADER: FULL MARKET SCANNER ---")
+print("--- VIBE TRADER: SMART SCANNER (NO DUPLICATES) ---")
 
-# Ühendused
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
 
-# --- 2. VARADE LEIDJA (Leiab kõik, mida üldse kaubelda saab) ---
+# --- 2. VARADE LEIDJA ---
 def get_all_tradable_coins():
     print("\n1. SKANNER: Laen alla kõik Alpaca krüptovaluutad...")
-    
-    # Küsime Alpacalt kõik aktiivsed krüptod
     search_params = GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE)
     assets = trading_client.get_all_assets(search_params)
     
-    # Filtreerime välja need, mis pole kaubeldavad (tradable=True)
-    tradable_symbols = [asset.symbol for asset in assets if asset.tradable]
+    # Filtreerime välja:
+    # 1. Need, mis pole kaubeldavad
+    # 2. Need, mis ei ole USD paarid (viskame välja BTC/USDT, ETH/USDC jne)
+    tradable_symbols = [
+        asset.symbol for asset in assets 
+        if asset.tradable and asset.symbol.endswith("/USD")
+    ]
     
-    print(f"   -> Leidsin {len(tradable_symbols)} kaubeldavat münti.")
+    print(f"   -> Leidsin {len(tradable_symbols)} puhast USD paari.")
     return tradable_symbols
 
-# --- 3. MATEMAATILINE FILTER (Leiab suurimad liikujad) ---
+# --- 3. MATEMAATILINE FILTER ---
 def find_top_movers(all_symbols, limit=5):
     print("2. FILTER: Otsin suurimaid liikujaid (Volume & Volatility)...")
-    
-    # Küsime kõigi nende müntide hetkeseisu korraga
-    # Alpaca API tahab sümboleid kujul "BTC/USD"
     
     try:
         snapshots = data_client.get_crypto_snapshot(CryptoSnapshotRequest(symbol_or_symbols=all_symbols))
@@ -55,8 +54,8 @@ def find_top_movers(all_symbols, limit=5):
 
     candidates = []
     
-    # Need on stabiilsed mündid, mis ei liigu (pole mõtet analüüsida)
-    ignore_list = ["USDT/USD", "USDC/USD", "DAI/USD", "TUSD/USD", "PAXG/USD"]
+    # Stabiilsed mündid, mida ignoreerida
+    ignore_list = ["USDT/USD", "USDC/USD", "DAI/USD", "TUSD/USD", "PAXG/USD", "USDP/USD"]
 
     for symbol, snapshot in snapshots.items():
         if symbol in ignore_list:
@@ -66,7 +65,6 @@ def find_top_movers(all_symbols, limit=5):
         if not daily_bar:
             continue
             
-        # Arvutame protsentuaalse muutuse (avamine vs praegune hind)
         open_price = daily_bar.open
         current_price = daily_bar.close
         
@@ -75,15 +73,14 @@ def find_top_movers(all_symbols, limit=5):
             
         change_pct = ((current_price - open_price) / open_price) * 100
         
-        # Lisame nimekirja: (Sümbol, Muutus%, Hind)
         candidates.append({
             "symbol": symbol,
             "change": change_pct,
-            "abs_change": abs(change_pct), # Jälgime liikumise suurust, suund pole alguses tähtis
+            "abs_change": abs(change_pct),
             "price": current_price
         })
 
-    # Sorteerime suurima liikumise järgi (Top Movers)
+    # Sorteerime suurima liikumise järgi
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     
     top_picks = candidates[:limit]
@@ -102,15 +99,14 @@ def analyze_coin(symbol):
     
     try:
         ticker = yf.Ticker(yahoo_symbol)
-        news_list = ticker.news[:3] # 3 värsket uudist
+        news_list = ticker.news[:3]
     except:
         return 0
 
     if not news_list:
-        print("      Uudiseid polnud.")
+        print("      Uudiseid polnud (Yahoo viga või vaikne päev).")
         return 0
 
-    # Valmistame teksti ette
     news_text = ""
     for article in news_list:
         title = article.get('title')
@@ -119,16 +115,18 @@ def analyze_coin(symbol):
         if not title: title = article.get('headline', '')
         news_text += f"- {title}\n"
 
-    # AI Prompt
+    # AI Prompt - Nüüd veel täpsem
     prompt = f"""
-    Oled halastamatu krüptokaupleja. Analüüsi valuutat {symbol}.
+    Oled professionaalne krüptokaupleja. Analüüsi valuutat {symbol}.
     Uudised:
     {news_text}
     
-    Anna hinnang "Short-term Trading Score" (0-100).
-    - Kui uudised räägivad suurest tõusust/partnerlusest -> 80-100.
-    - Kui uudised on halvad/hirm -> 0-20.
-    - Kui uudised on vanad või igavad -> 40-60.
+    Hinda "Trading Opportunity Score" (0-100).
+    - Kui uudised viitavad selgele tõusule -> 80-100.
+    - Kui uudised on väga halvad (hirm, häkkimine) -> 0-20.
+    - Kui uudised on vanad või ebaolulised -> 40-60.
+    
+    NB! Kui hind on täna kõvasti kukkunud, aga uudised on neutraalsed/head, siis see on OSTUKOHT (skoor 75+).
     
     Vasta AINULT numbriga.
     """
@@ -147,16 +145,13 @@ def analyze_coin(symbol):
 
 # --- 5. TÖÖVOOG ---
 def run_scanner():
-    # 1. Kõik mündid
     all_coins = get_all_tradable_coins()
     if not all_coins:
         print("Viga: Ei leidnud Alpacast münte.")
         return
 
-    # 2. Leia kuumad
     candidates = find_top_movers(all_coins, limit=5)
     
-    # 3. AI Analüüs
     best_coin = None
     best_score = -1
 
@@ -164,14 +159,11 @@ def run_scanner():
     for coin_data in candidates:
         score = analyze_coin(coin_data['symbol'])
         
-        # Väike loogika: Kui hind on kukkunud (-10%) aga skoor on kõrge (80+), 
-        # siis on see "Buy the Dip" võimalus!
-        
         if score > best_score:
             best_score = score
             best_coin = coin_data
 
-    # 4. Otsus
+    # --- OTSUS ---
     if best_coin and best_score >= 75:
         print(f"\n--- VÕITJA SELGUNUD ---")
         print(f"Münt: {best_coin['symbol']}")
@@ -182,7 +174,7 @@ def run_scanner():
     else:
         print(f"\n--- TULEMUS ---")
         print(f"Parim oli {best_coin['symbol'] if best_coin else 'Puudub'} skooriga {best_score}.")
-        print("Turg on liiga ebakindel. Täna ei riski.")
+        print("Turg on liiga ebakindel või igav. Täna ei riski.")
 
 def trade_decision(symbol):
     account = trading_client.get_account()
@@ -190,7 +182,7 @@ def trade_decision(symbol):
         print("Raha otsas!")
         return
 
-    print(f"4. TEGIJA: Ostame ${symbol} $50 eest.")
+    print(f"4. TEGIJA: Ostame {symbol} $50 eest.")
     try:
         req = MarketOrderRequest(
             symbol=symbol,
@@ -199,7 +191,7 @@ def trade_decision(symbol):
             time_in_force=TimeInForce.GTC
         )
         trading_client.submit_order(req)
-        print("TEHTUD! Oled nüüd selle omanik.")
+        print("TEHTUD! Order saadetud.")
     except Exception as e:
         print(f"Viga ostul: {e}")
 
