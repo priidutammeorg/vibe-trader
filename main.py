@@ -19,7 +19,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu (.env)!")
     exit()
 
-print("--- VIBE TRADER: COMPLETE CYCLE (BUY & SELL) ---")
+print("--- VIBE TRADER: COMPLETE CYCLE (SMART ACCUMULATION) ---")
 
 # REEGLID MÜÜGIKS
 TAKE_PROFIT_PCT = 10.0  # Müüme, kui kasum on 10%
@@ -47,7 +47,6 @@ def manage_existing_positions():
         symbol = p.symbol
         # Alpaca annab kasumi kümnendkohana (nt 0.05 on 5%)
         profit_pct = float(p.unrealized_plpc) * 100
-        current_price = float(p.current_price)
         qty = float(p.qty)
         
         print(f"   -> {symbol}: {profit_pct:.2f}% (Kogus: {qty})")
@@ -185,6 +184,13 @@ def run_cycle():
     # SAMM 1: Korista portfell (Müü kasum või kahjum)
     manage_existing_positions()
     
+    # --- UUS KAITSE: Küsime, mis meil juba olemas on ---
+    try:
+        current_positions = [p.symbol for p in trading_client.get_all_positions()]
+    except:
+        current_positions = []
+    # ---------------------------------------------------
+
     # SAMM 2: Otsi uusi võimalusi
     all_coins = get_all_tradable_coins()
     if not all_coins: return
@@ -196,7 +202,15 @@ def run_cycle():
 
     print("\n4. AI ANALÜÜS: Valime parima...")
     for coin_data in candidates:
-        score = analyze_coin(coin_data['symbol'])
+        symbol = coin_data['symbol']
+
+        # --- UUS KAITSE: Kui münt on olemas, jätame vahele ---
+        if symbol in current_positions:
+            print(f"   -> {symbol} on juba portfellis. Jätan vahele ja ei osta topelt.")
+            continue
+        # -----------------------------------------------------
+
+        score = analyze_coin(symbol)
         if score > best_score:
             best_score = score
             best_coin = coin_data
@@ -206,7 +220,8 @@ def run_cycle():
         print(f"\n--- VÕITJA: {best_coin['symbol']} (Skoor: {best_score}) ---")
         trade_decision(best_coin['symbol'])
     else:
-        print(f"\n--- TULEMUS: Parim oli {best_coin['symbol'] if best_coin else '-'} ({best_score}p). Ei osta.")
+        symbol_show = best_coin['symbol'] if best_coin else '-'
+        print(f"\n--- TULEMUS: Parim kandidaat oli {symbol_show} ({best_score}p). Ei osta.")
 
 if __name__ == "__main__":
-    run_cycle()
+    run_cycle() 
