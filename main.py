@@ -16,7 +16,7 @@ if not api_key or not secret_key:
     print("VIGA: Alpaca võtmed on puudu!")
     exit()
 
-print("--- VIBE TRADER: AI POWERED (FIXED) ---")
+print("--- VIBE TRADER: AI POWERED (DEEP SEARCH) ---")
 
 # Ühendused
 trading_client = TradingClient(api_key, secret_key, paper=True)
@@ -25,7 +25,7 @@ ai_client = None
 if openai_key:
     ai_client = OpenAI(api_key=openai_key)
 else:
-    print("HOIATUS: OpenAI võti puudub. AI funktsionaalsus on piiratud.")
+    print("HOIATUS: OpenAI võti puudub.")
 
 # 2. LUGEJA (Reader)
 def get_latest_news(symbol="BTC-USD"):
@@ -53,14 +53,27 @@ def analyze_with_gpt(news_list):
     print("\n2. AI ANALÜÜTIK: Saadan uudised GPT-le analüüsimiseks...")
     
     news_text = ""
-    # SIIN OLI VIGA ENNE - JÄLGI TAANET!
     for i, article in enumerate(news_list):
-        # Kasutame .get(), et vältida KeyError viga
-        title = article.get('title', article.get('headline', 'Pealkiri puudub'))
+        # --- PARANDUS: Otsime pealkirja sügavamalt ---
+        title = article.get('title')
         
-        # Debug info esimese artikli kohta
+        # Kui pealkirja polnud, vaatame 'content' sisse
+        if not title and 'content' in article:
+            # Vahel on content ise sõnastik
+            if isinstance(article['content'], dict):
+                title = article['content'].get('title')
+        
+        # Kui ikka pole, proovime 'headline'
+        if not title:
+            title = article.get('headline')
+
+        # Kui ikka pole, siis on mingi jama
+        if not title:
+            title = "Pealkiri puudub"
+
+        # Debugime esimest uudist põhjalikumalt
         if i == 0:
-            print(f"   [DEBUG] Esimene uudis sisaldab võtmeid: {list(article.keys())}")
+            print(f"   [DEBUG] Esimene toores uudis: {article}")
             
         news_text += f"- Uudis {i+1}: {title}\n"
 
@@ -73,7 +86,7 @@ def analyze_with_gpt(news_list):
     Hinda mõju hinnale. Vasta AINULT ühe sõnaga:
     - BUY (kui uudised on väga head)
     - SELL (kui uudised on halvad)
-    - WAIT (kui neutraalne)
+    - WAIT (kui neutraalne või info puudub)
     """
 
     try:
