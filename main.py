@@ -19,7 +19,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu (.env)!")
     exit()
 
-print("--- VIBE TRADER: COMPLETE CYCLE (SMART ACCUMULATION) ---")
+print("--- VIBE TRADER: COMPLETE CYCLE (FINAL VERSION) ---")
 
 # REEGLID MÜÜGIKS
 TAKE_PROFIT_PCT = 10.0  # Müüme, kui kasum on 10%
@@ -91,6 +91,7 @@ def find_top_movers(all_symbols, limit=5):
         return []
 
     candidates = []
+    # Ignoreerime stabiilseid münte
     ignore_list = ["USDT/USD", "USDC/USD", "DAI/USD", "TUSD/USD", "PAXG/USD", "USDP/USD"]
 
     for symbol, snapshot in snapshots.items():
@@ -185,8 +186,9 @@ def run_cycle():
     manage_existing_positions()
     
     # --- UUS KAITSE: Küsime, mis meil juba olemas on ---
+    # Salvestame sümbolid "puhtalt" (ilma kaldkriipsude ja sidekriipsudeta), et vältida vigu
     try:
-        current_positions = [p.symbol for p in trading_client.get_all_positions()]
+        current_positions = [p.symbol.replace("/", "").replace("-", "") for p in trading_client.get_all_positions()]
     except:
         current_positions = []
     # ---------------------------------------------------
@@ -204,8 +206,10 @@ def run_cycle():
     for coin_data in candidates:
         symbol = coin_data['symbol']
 
-        # --- UUS KAITSE: Kui münt on olemas, jätame vahele ---
-        if symbol in current_positions:
+        # --- UUS KAITSE: Kontrollime puhast sümbolit ---
+        clean_symbol = symbol.replace("/", "").replace("-", "")
+
+        if clean_symbol in current_positions:
             print(f"   -> {symbol} on juba portfellis. Jätan vahele ja ei osta topelt.")
             continue
         # -----------------------------------------------------
@@ -224,4 +228,4 @@ def run_cycle():
         print(f"\n--- TULEMUS: Parim kandidaat oli {symbol_show} ({best_score}p). Ei osta.")
 
 if __name__ == "__main__":
-    run_cycle() 
+    run_cycle()
