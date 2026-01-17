@@ -3,6 +3,7 @@ import sys
 import time
 import builtins
 import re
+import requests # Vajalik uue API jaoks
 from datetime import datetime
 import yfinance as yf
 from dotenv import load_dotenv
@@ -24,12 +25,14 @@ load_dotenv()
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
+# UUS: CryptoPanic võti
+cp_key = os.getenv("CRYPTOPANIC_API_KEY")
 
 if not api_key or not secret_key or not openai_key:
-    print("VIGA: Võtmed puudu!")
+    print("VIGA: Põhivõtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: STRICT MODE ---")
+print("--- VIBE TRADER: CRYPTOPANIC EDITION ---")
 
 TAKE_PROFIT_PCT = 10.0
 STOP_LOSS_PCT = -5.0
@@ -39,12 +42,38 @@ trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
 
-# --- 2. HELPER FUNCTIONS ---
+# --- 2. ABIFUNKTSIOONID ---
 def get_clean_positions_list():
     try:
         positions = trading_client.get_all_positions()
         return [p.symbol.replace("/", "").replace("-", "") for p in positions]
     except:
+        return []
+
+def get_cryptopanic_news(symbol):
+    """Küsib CryptoPanic API-st uudiseid"""
+    if not cp_key: return []
+    
+    # Eemaldame /USD, et saada puhas sümbol (nt BTC)
+    clean_sym = symbol.split("/")[0]
+    
+    url = f"https://cryptopanic.com/api/v1/posts/?auth_token={cp_key}&currencies={clean_sym}&kind=news&filter=hot"
+    
+    try:
+        res = requests.get(url, timeout=5)
+        data = res.json()
+        results = data.get('results', [])
+        
+        news_items = []
+        for item in results[:3]: # Võtame 3 värskemat
+            news_items.append({
+                'title': item['title'],
+                'link': item['url'], # CryptoPanic lühilink
+                'source': 'CryptoPanic'
+            })
+        return news_items
+    except Exception as e:
+        print(f"      Viga CryptoPanicis: {e}")
         return []
 
 def manage_existing_positions():
@@ -98,39 +127,48 @@ def get_candidates():
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     return candidates[:5]
 
-# --- 3. FIX: ANALÜÜS JA LINGID ---
+# --- 3. ANALÜÜS (Yahoo + CryptoPanic) ---
 def analyze_coin(symbol):
     print(f"   -> Analüüsin: {symbol}...")
     
-    # 1. Proovime uudiseid saada
-    news_items = []
-    try:
-        yahoo_symbol = symbol.replace("/", "-")
-        ticker = yf.Ticker(yahoo_symbol)
-        raw_news = ticker.news
-        if raw_news:
-            news_items = raw_news[:2]
-    except:
-        pass
+    all_news = []
+
+    # ALLIKAS 1: CryptoPanic (Värskeim)
+    cp_news = get_cryptopanic_news(symbol)
+    if cp_news:
+        all_news.extend(cp_news)
+
+    # ALLIKAS 2: Yahoo Finance (Tagavara)
+    if len(all_news) < 2: # Kui CryptoPanic andis vähe, küsime Yahoost lisa
+        try:
+            yahoo_symbol = symbol.replace("/", "-")
+            ticker = yf.Ticker(yahoo_symbol)
+            y_news = ticker.news[:2]
+            for n in y_news:
+                all_news.append({
+                    'title': n.get('title'),
+                    'link': n.get('link') or n.get('url'),
+                    'source': 'Yahoo'
+                })
+        except:
+            pass
 
     news_text = ""
-    if news_items:
-        for n in news_items:
-            title = n.get('title', 'Pealkiri puudub')
-            # YFinance linkide fix: otsime 'link' või 'url'
-            link = n.get('link') or n.get('url') or 'https://finance.yahoo.com'
-            
-            # Prindime logisse spetsiaalse märgistusega rea
+    if all_news:
+        for n in all_news:
+            title = n['title']
+            link = n['link']
+            # Logime lingi dashboardi jaoks
             print(f"      > UUDIS: {title} ||| {link}")
-            news_text += f"- {title}\n"
+            news_text += f"- {title} (Allikas: {n['source']})\n"
     else:
         print("      Uudiseid pole (Neutraalne).")
         news_text = "Uudiseid ei leitud."
 
-    # 2. RANGEM AI PROMPT
+    # AI PROMPT
     prompt = f"""
     Analüüsi krüptovaluutat {symbol}.
-    Uudised:
+    Viimased uudised:
     {news_text}
     
     Hinda ostupotentsiaali (0-100).
@@ -147,19 +185,17 @@ def analyze_coin(symbol):
         )
         content = res.choices[0].message.content.strip()
         
-        # 3. RANGEM REGEX (Otsib kindlat mustrit "SKOOR: 85")
-        # See välistab kuupäevad jms jama
         match = re.search(r'SKOOR:\s*(\d+)', content, re.IGNORECASE)
         
         if match:
             score = int(match.group(1))
-            score = min(score, 100) # Igaks juhuks piiraja
+            score = min(score, 100)
         else:
-            # Fallback: kui AI eksis vorminguga, proovime leida väikest numbrit
+            # Fallback
             fallback_match = re.search(r'\b(\d{1,3})\b', content)
             if fallback_match:
                  score = int(fallback_match.group(1))
-                 if score > 100: score = 0 # Kui ikka on aastaarv, siis 0
+                 if score > 100: score = 0
             else:
                 score = 0
             
