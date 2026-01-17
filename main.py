@@ -208,3 +208,73 @@ def analyze_coin(symbol):
     score = 0
     try:
         res = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        content = res.choices[0].message.content.strip()
+        match = re.search(r'SKOOR:\s*(\d+)', content, re.IGNORECASE)
+        if match:
+            score = min(int(match.group(1)), 100)
+        else:
+            score = 0
+    except:
+        score = 0
+
+    print(f"      AI HINNE: {score}/100")
+    
+    # 4. SALVESTAME MÄLJU UUE TULEMUSE
+    brain[symbol] = {
+        "timestamp": datetime.now().timestamp(),
+        "news_hash": current_news_hash,
+        "score": score
+    }
+    save_brain(brain)
+    
+    return score
+
+def trade(symbol):
+    try:
+        acc = trading_client.get_account()
+        if float(acc.buying_power) < 55:
+            print("   -> Raha otsas! Ei saa osta.")
+            return
+    except: pass
+
+    print(f"5. TEGIJA: Ostame {symbol} $50 eest.")
+    try:
+        req = MarketOrderRequest(symbol=symbol, notional=50, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
+        trading_client.submit_order(req)
+        print("   -> TEHTUD! Ostetud.")
+    except Exception as e:
+        print(f"   -> Viga ostul: {e}")
+
+def run_cycle():
+    manage_existing_positions()
+    my_pos = get_clean_positions_list()
+    candidates = get_candidates()
+    best_coin = None
+    best_score = -1
+
+    print("4. AI ANALÜÜS: Valime parima...")
+    for c in candidates:
+        s = c['symbol']
+        clean = s.replace("/", "").replace("-", "")
+        if clean in my_pos:
+            print(f"   -> {s} olemas. Skip.")
+            continue
+            
+        score = analyze_coin(s)
+        if score > best_score:
+            best_score = score
+            best_coin = c
+
+    if best_coin and best_score >= MIN_SCORE_TO_BUY:
+        print(f"--- VÕITJA: {best_coin['symbol']} (Skoor: {best_score}) ---")
+        trade(best_coin['symbol'])
+    else:
+        w = best_coin['symbol'] if best_coin else "-"
+        print(f"--- TULEMUS: Parim {w} ({best_score}p). Ei osta.")
+
+if __name__ == "__main__":
+    run_cycle()
