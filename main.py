@@ -31,7 +31,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Põhivõtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v7.0 (CRYPTOCOMPARE) ---")
+print("--- VIBE TRADER: v7.1 (DEEP READ) ---")
 
 TAKE_PROFIT_PCT = 10.0
 STOP_LOSS_PCT = -5.0
@@ -51,20 +51,17 @@ def get_clean_positions_list():
         return []
 
 def get_cryptocompare_news(symbol):
-    """Küsib CryptoCompare API-st uudiseid (Ei vaja võtit, ei bloki)"""
+    """Küsib CryptoCompare API-st uudiseid koos sisuga"""
     
-    clean_sym = symbol.split("/")[0] # N: BTC
-    
-    # CryptoCompare API endpoint
+    clean_sym = symbol.split("/")[0]
     url = "https://min-api.cryptocompare.com/data/v2/news/"
     
     params = {
         "lang": "EN",
-        "categories": clean_sym # Filtreerime mündi järgi
+        "categories": clean_sym
     }
     
     try:
-        # Tavalised päised on siin piisavad
         headers = {'User-Agent': 'VibeTrader/1.0'}
         res = requests.get(url, params=params, headers=headers, timeout=10)
         
@@ -76,11 +73,12 @@ def get_cryptocompare_news(symbol):
         results = data.get('Data', [])
         
         news_items = []
-        # Võtame kuni 3 uudist
         for item in results[:3]:
+            # --- MUUDATUS: Loeme ka sisu (body) ---
             news_items.append({
-                'title': item.get('title'),
-                'link': item.get('url'),
+                'title': item.get('title', ''),
+                'body': item.get('body', ''), # <--- SIIN ON SISU
+                'link': item.get('url', ''),
                 'source': item.get('source', 'CryptoCompare')
             })
             
@@ -151,40 +149,52 @@ def analyze_coin(symbol):
     print(f"   -> Analüüsin: {symbol}...")
     
     all_news = []
-    
-    # 1. CryptoCompare (UUS & STABIILNE)
     cc_news = get_cryptocompare_news(symbol)
     if cc_news: all_news.extend(cc_news)
 
-    # 2. Yahoo (Backup)
+    # Backup Yahoo (lihtne struktuur)
     if len(all_news) < 2:
         try:
             ticker = yf.Ticker(symbol.replace("/", "-"))
             for n in ticker.news[:2]:
-                all_news.append({'title': n.get('title'), 'link': n.get('link') or n.get('url'), 'source': 'Yahoo'})
+                all_news.append({
+                    'title': n.get('title'), 
+                    'body': '', # Yahoost bodyt kätte saada on keerulisem, jätame tühjaks
+                    'link': n.get('link') or n.get('url'), 
+                    'source': 'Yahoo'
+                })
         except: pass
 
     news_text = ""
     if all_news:
         for n in all_news:
             title = n.get('title', 'N/A')
+            body = n.get('body', '') # Võtame sisu
             link = n.get('link', '#')
-            # Logime dashboardi jaoks
+            
+            # Dashboardile läheb ikka pealkiri ja link
             print(f"      > UUDIS: {title} ||| {link}")
-            news_text += f"- {title}\n"
+            
+            # --- MUUDATUS: AI saab nüüd ka sisu ---
+            news_text += f"PEALKIRI: {title}\nSISU: {body}\nALLIKAS: {n.get('source')}\n---\n"
+            # --------------------------------------
     else:
         print("      Uudiseid pole (Neutraalne).")
         news_text = "Uudiseid ei leitud."
 
     prompt = f"""
     Analüüsi krüptovaluutat {symbol}.
-    Uudised:
+    
+    VIIMASED UUDISED:
     {news_text}
     
-    Hinda ostupotentsiaali (0-100).
-    OLULINE: Vasta AINULT järgmises vormingus:
+    Sinu ülesanne:
+    Analüüsi uudiste sisu põhjalikult. Kui uudised on positiivsed (partnerlused, uuendused, ETF), anna kõrge skoor.
+    Kui uudised on negatiivsed (häkkimised, kohtuasjad), anna madal skoor.
+    
+    Vasta AINULT formaadis:
     SKOOR: X
-    (kus X on number).
+    (kus X on number 0-100).
     """
     
     try:
