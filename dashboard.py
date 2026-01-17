@@ -4,30 +4,47 @@ import math
 import re
 
 app = Flask(__name__)
+
+# Logifaili asukoht
 LOG_FILE = "/root/vibe-trader/bot.log"
 LINES_PER_PAGE = 100
 
 def classify_log_line(line):
+    """Määrab reale värvi ja ikooni"""
     lower = line.lower()
-    if "võitja" in lower or "ostame" in lower or "tehtud! ostetud" in lower: return "card-buy", "🚀 OST"
-    if "kasum" in lower or "müün" in lower or "tehtud! müüdud" in lower: return "card-sell", "💰 MÜÜK"
-    if "kahjum" in lower: return "card-loss", "🔻 STOP"
-    if "> uudis:" in lower: return "card-news", "📰 UUDIS"
-    if "raha otsas" in lower: return "card-warning", "⚠️ RAHA"
+    
+    if "võitja" in lower or "ostame" in lower or "tehtud! ostetud" in lower:
+        return "card-buy", "🚀 OST"
+    if "kasum" in lower or "müün" in lower or "tehtud! müüdud" in lower:
+        return "card-sell", "💰 MÜÜK"
+    if "kahjum" in lower:
+        return "card-loss", "🔻 STOP"
+    if "> uudis:" in lower:
+        return "card-news", "📰 UUDIS"
+    if "raha otsas" in lower:
+        return "card-warning", "⚠️ RAHA"
+        
     return "card-noise", ""
 
 @app.route("/")
 def view_log():
     lines = []
+    # Loeme faili, toetame nii UTF-8 kui Latin-1
     if os.path.exists(LOG_FILE):
         try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f: lines = f.readlines()
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
         except:
-            with open(LOG_FILE, "r", encoding="latin-1") as f: lines = f.readlines()
-        lines = lines[::-1]
+            with open(LOG_FILE, "r", encoding="latin-1") as f:
+                lines = f.readlines()
+        lines = lines[::-1] # Uusimad ees
 
+    # Pagination
     total_pages = math.ceil(len(lines) / LINES_PER_PAGE) or 1
     page = request.args.get('page', 1, type=int)
+    if page < 1: page = 1
+    if page > total_pages: page = total_pages
+
     current_lines = lines[(page-1)*LINES_PER_PAGE : page*LINES_PER_PAGE]
 
     feed_html = ""
@@ -35,6 +52,7 @@ def view_log():
         clean = line.strip()
         if not clean: continue
         
+        # Eraldame ajatempli [2026-...]
         ts = ""
         msg = clean
         if clean.startswith("[") and "]" in clean:
@@ -44,10 +62,12 @@ def view_log():
 
         css, badge = classify_log_line(msg)
         
-        # Lingi parsimine (eraldaja |||)
+        # --- UUDISTE LINGI TÖÖTLUS ---
         link_html = ""
         if css == "card-news":
+            # Eemaldame prefiksi
             raw_content = msg.replace("> UUDIS:", "").strip()
+            # Eraldame pealkirja ja URLi (eraldaja on |||)
             if "|||" in raw_content:
                 parts = raw_content.split("|||")
                 title = parts[0].strip()
@@ -67,6 +87,10 @@ def view_log():
         </div>
         """
 
+    # Navigatsiooninupud
+    prev_url = f'/?page={page-1}' if page > 1 else '#'
+    next_url = f'/?page={page+1}' if page < total_pages else '#'
+
     return f"""
     <!DOCTYPE html>
     <html>
@@ -79,7 +103,7 @@ def view_log():
             .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; margin-bottom: 20px; padding-bottom: 10px; }}
             .event {{ background: #1e293b; border: 1px solid #334155; padding: 12px; border-radius: 8px; margin-bottom: 10px; }}
             .meta {{ display: flex; gap: 10px; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }}
-            .time {{ color: #38bdf8; min-width: 130px; }}
+            .time {{ color: #38bdf8; min-width: 130px; font-family: monospace; }}
             .badge {{ font-weight: bold; padding: 2px 6px; border-radius: 4px; }}
             
             .card-buy {{ border-left: 4px solid #10b981; }} .card-buy .badge {{ background: #10b981; color: #fff; }}
@@ -99,7 +123,7 @@ def view_log():
     <body>
         <div class="header"><h1>🤖 Vibe Trader</h1><span>LIVE</span></div>
         {feed_html}
-        <div class="nav"><a href="/?page={page-1}">❮ Uuemad</a> <span>Leht {page}</span> <a href="/?page={page+1}">Vanemad ❯</a></div>
+        <div class="nav"><a href="{prev_url}">❮ Uuemad</a> <span>Leht {page}</span> <a href="{next_url}">Vanemad ❯</a></div>
     </body>
     </html>
     """
