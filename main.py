@@ -4,7 +4,6 @@ import time
 import builtins
 import re
 import requests
-import cloudscraper # <--- UUS RELV
 from datetime import datetime
 import yfinance as yf
 from dotenv import load_dotenv
@@ -15,7 +14,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 
-# --- 0. JÕULINE LOGIMINE ---
+# --- 0. LOGIMINE ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
     kwargs['flush'] = True
@@ -27,15 +26,12 @@ load_dotenv()
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
-cp_key = os.getenv("CRYPTOPANIC_API_KEY")
-
-if cp_key: cp_key = cp_key.strip()
 
 if not api_key or not secret_key or not openai_key:
     print("VIGA: Põhivõtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: FINAL v6.0 (CLOUDSCRAPER) ---")
+print("--- VIBE TRADER: v7.0 (CRYPTOCOMPARE) ---")
 
 TAKE_PROFIT_PCT = 10.0
 STOP_LOSS_PCT = -5.0
@@ -44,8 +40,6 @@ MIN_SCORE_TO_BUY = 75
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
-# Loome scraperi, mis käitub nagu päris brauser
-scraper = cloudscraper.create_scraper()
 
 # --- 2. ABIFUNKTSIOONID ---
 
@@ -56,49 +50,44 @@ def get_clean_positions_list():
     except:
         return []
 
-def get_cryptopanic_news(symbol):
-    """Küsib CryptoPanic API-st uudiseid (CLOUDSCRAPER BYPASS)"""
-    if not cp_key: return []
+def get_cryptocompare_news(symbol):
+    """Küsib CryptoCompare API-st uudiseid (Ei vaja võtit, ei bloki)"""
     
-    clean_sym = symbol.split("/")[0]
-    # Kasutame URLi ilma parameetriteta stringis, anname need eraldi
-    base_url = "https://cryptopanic.com/api/v1/posts/"
+    clean_sym = symbol.split("/")[0] # N: BTC
+    
+    # CryptoCompare API endpoint
+    url = "https://min-api.cryptocompare.com/data/v2/news/"
     
     params = {
-        "auth_token": cp_key,
-        "currencies": clean_sym,
-        "kind": "news",
-        "filter": "hot",
-        "public": "true"
+        "lang": "EN",
+        "categories": clean_sym # Filtreerime mündi järgi
     }
     
     try:
-        # KASUTAME SCRAPERIT tavalise requests asemel
-        res = scraper.get(base_url, params=params, timeout=15)
+        # Tavalised päised on siin piisavad
+        headers = {'User-Agent': 'VibeTrader/1.0'}
+        res = requests.get(url, params=params, headers=headers, timeout=10)
         
         if res.status_code != 200:
-            print(f"      CryptoPanic VIGA {res.status_code}")
+            print(f"      CryptoCompare VIGA {res.status_code}")
             return []
 
-        try:
-            data = res.json()
-        except:
-            print("      CryptoPanic tagastas ikka HTMLi (Cloudflare blokk).")
-            return []
-
-        results = data.get('results', [])
+        data = res.json()
+        results = data.get('Data', [])
         
         news_items = []
+        # Võtame kuni 3 uudist
         for item in results[:3]:
             news_items.append({
-                'title': item['title'],
-                'link': item['url'],
-                'source': 'CryptoPanic'
+                'title': item.get('title'),
+                'link': item.get('url'),
+                'source': item.get('source', 'CryptoCompare')
             })
+            
         return news_items
 
     except Exception as e:
-        print(f"      Viga ühenduses CryptoPanicuga: {e}")
+        print(f"      Viga uudistega: {e}")
         return []
 
 # --- 3. PEAMISED FUNKTSIOONID ---
@@ -163,9 +152,9 @@ def analyze_coin(symbol):
     
     all_news = []
     
-    # 1. CryptoPanic (Scraperiga)
-    cp_news = get_cryptopanic_news(symbol)
-    if cp_news: all_news.extend(cp_news)
+    # 1. CryptoCompare (UUS & STABIILNE)
+    cc_news = get_cryptocompare_news(symbol)
+    if cc_news: all_news.extend(cc_news)
 
     # 2. Yahoo (Backup)
     if len(all_news) < 2:
