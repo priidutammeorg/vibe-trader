@@ -4,42 +4,28 @@ import math
 import re
 
 app = Flask(__name__)
-
-# Logifaili asukoht
 LOG_FILE = "/root/vibe-trader/bot.log"
 LINES_PER_PAGE = 100
 
 def classify_log_line(line):
-    """Määrab reale värvi ja ikooni"""
     lower = line.lower()
-    
-    if "võitja" in lower or "ostame" in lower or "tehtud! ostetud" in lower:
-        return "card-buy", "🚀 OST"
-    if "kasum" in lower or "müün" in lower or "tehtud! müüdud" in lower:
-        return "card-sell", "💰 MÜÜK"
-    if "kahjum" in lower:
-        return "card-loss", "🔻 STOP"
-    if "> uudis:" in lower:
-        return "card-news", "📰 UUDIS"
-    if "raha otsas" in lower:
-        return "card-warning", "⚠️ RAHA"
-        
+    if "võitja" in lower or "ostame" in lower or "tehtud! ostetud" in lower: return "card-buy", "🚀 OST"
+    if "kasum" in lower or "müün" in lower or "tehtud! müüdud" in lower: return "card-sell", "💰 MÜÜK"
+    if "kahjum" in lower: return "card-loss", "🔻 STOP"
+    if "> uudis:" in lower: return "card-news", "📰 UUDIS"
+    if "raha otsas" in lower: return "card-warning", "⚠️ RAHA"
     return "card-noise", ""
 
 @app.route("/")
 def view_log():
     lines = []
-    # Loeme faili, toetame nii UTF-8 kui Latin-1
     if os.path.exists(LOG_FILE):
         try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            with open(LOG_FILE, "r", encoding="utf-8") as f: lines = f.readlines()
         except:
-            with open(LOG_FILE, "r", encoding="latin-1") as f:
-                lines = f.readlines()
-        lines = lines[::-1] # Uusimad ees
+            with open(LOG_FILE, "r", encoding="latin-1") as f: lines = f.readlines()
+        lines = lines[::-1]
 
-    # Pagination
     total_pages = math.ceil(len(lines) / LINES_PER_PAGE) or 1
     page = request.args.get('page', 1, type=int)
     if page < 1: page = 1
@@ -52,7 +38,6 @@ def view_log():
         clean = line.strip()
         if not clean: continue
         
-        # Eraldame ajatempli [2026-...]
         ts = ""
         msg = clean
         if clean.startswith("[") and "]" in clean:
@@ -62,12 +47,9 @@ def view_log():
 
         css, badge = classify_log_line(msg)
         
-        # --- UUDISTE LINGI TÖÖTLUS ---
         link_html = ""
         if css == "card-news":
-            # Eemaldame prefiksi
             raw_content = msg.replace("> UUDIS:", "").strip()
-            # Eraldame pealkirja ja URLi (eraldaja on |||)
             if "|||" in raw_content:
                 parts = raw_content.split("|||")
                 title = parts[0].strip()
@@ -87,7 +69,6 @@ def view_log():
         </div>
         """
 
-    # Navigatsiooninupud
     prev_url = f'/?page={page-1}' if page > 1 else '#'
     next_url = f'/?page={page+1}' if page < total_pages else '#'
 

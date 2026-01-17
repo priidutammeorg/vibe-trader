@@ -4,6 +4,7 @@ import time
 import builtins
 import re
 import requests
+import cloudscraper # <--- UUS RELV
 from datetime import datetime
 import yfinance as yf
 from dotenv import load_dotenv
@@ -15,44 +16,40 @@ from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 
 # --- 0. JÕULINE LOGIMINE ---
-# Sunnime Pythonit igale reale kellaaega lisama ja kohe faili kirjutama
 def print(*args, **kwargs):
     now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
     kwargs['flush'] = True
     builtins.print(f"{now}", *args, **kwargs)
 
-# --- 1. SEADISTUS JA API VÕTMED ---
+# --- 1. SEADISTUS ---
 load_dotenv()
 
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
-
-# Puhastame CryptoPanic võtme tühikutest (tihti tekib copy-paste viga)
 cp_key = os.getenv("CRYPTOPANIC_API_KEY")
-if cp_key:
-    cp_key = cp_key.strip()
+
+if cp_key: cp_key = cp_key.strip()
 
 if not api_key or not secret_key or not openai_key:
-    print("VIGA: Põhivõtmed (.env) on puudu! Kontrolli faili.")
+    print("VIGA: Põhivõtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: FINAL v5.0 (URL FIX) ---")
+print("--- VIBE TRADER: FINAL v6.0 (CLOUDSCRAPER) ---")
 
-# REEGLID
 TAKE_PROFIT_PCT = 10.0
 STOP_LOSS_PCT = -5.0
 MIN_SCORE_TO_BUY = 75
 
-# KLIENDID
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
+# Loome scraperi, mis käitub nagu päris brauser
+scraper = cloudscraper.create_scraper()
 
 # --- 2. ABIFUNKTSIOONID ---
 
 def get_clean_positions_list():
-    """Tagastab portfellis olevad sümbolid puhtal kujul (nt ['BTC', 'ETH'])"""
     try:
         positions = trading_client.get_all_positions()
         return [p.symbol.replace("/", "").replace("-", "") for p in positions]
@@ -60,14 +57,13 @@ def get_clean_positions_list():
         return []
 
 def get_cryptopanic_news(symbol):
-    """Küsib CryptoPanic API-st uudiseid (FIXED URL & HEADERS)"""
-    if not cp_key: 
-        return []
+    """Küsib CryptoPanic API-st uudiseid (CLOUDSCRAPER BYPASS)"""
+    if not cp_key: return []
     
-    clean_sym = symbol.split("/")[0] # Teeme BTC/USD -> BTC
+    clean_sym = symbol.split("/")[0]
+    # Kasutame URLi ilma parameetriteta stringis, anname need eraldi
     base_url = "https://cryptopanic.com/api/v1/posts/"
     
-    # Parameetrid eraldi, et vältida URLi vigast ehitust
     params = {
         "auth_token": cp_key,
         "currencies": clean_sym,
@@ -76,26 +72,27 @@ def get_cryptopanic_news(symbol):
         "public": "true"
     }
     
-    # Teeskleme brauserit, et vältida 403/404 vigu
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
     try:
-        res = requests.get(base_url, params=params, headers=headers, timeout=10)
+        # KASUTAME SCRAPERIT tavalise requests asemel
+        res = scraper.get(base_url, params=params, timeout=15)
         
         if res.status_code != 200:
-            print(f"      CryptoPanic VIGA {res.status_code} (URL: {res.url})") 
+            print(f"      CryptoPanic VIGA {res.status_code}")
             return []
 
-        data = res.json()
+        try:
+            data = res.json()
+        except:
+            print("      CryptoPanic tagastas ikka HTMLi (Cloudflare blokk).")
+            return []
+
         results = data.get('results', [])
         
         news_items = []
         for item in results[:3]:
             news_items.append({
                 'title': item['title'],
-                'link': item['url'], # CryptoPanic lühilink
+                'link': item['url'],
                 'source': 'CryptoPanic'
             })
         return news_items
@@ -111,7 +108,6 @@ def manage_existing_positions():
     try:
         positions = trading_client.get_all_positions()
     except:
-        print("   Viga portfelli lugemisel.")
         return
 
     if not positions:
@@ -143,31 +139,22 @@ def get_candidates():
         search_params = GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE)
         assets = trading_client.get_all_assets(search_params)
         
-        # Välistame stabiilsed mündid
         ignore_list = ["USDT/USD", "USDC/USD", "DAI/USD", "TUSD/USD", "PAXG/USD", "WBTC/USD"]
-        tradable = [
-            a.symbol for a in assets 
-            if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore_list
-        ]
+        tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore_list]
         
         snapshots = data_client.get_crypto_snapshot(CryptoSnapshotRequest(symbol_or_symbols=tradable))
-    except Exception as e:
-        print(f"   Viga turuandmete laadimisel: {e}")
+    except:
         return []
 
     candidates = []
     for s, snap in snapshots.items():
         if not snap.daily_bar: continue
-        
         open_p = snap.daily_bar.open
         close_p = snap.daily_bar.close
-        
         if open_p == 0: continue
-        
         chg = ((close_p - open_p) / open_p) * 100
         candidates.append({"symbol": s, "change": chg, "abs_change": abs(chg)})
     
-    # Sorteerime suurima liikuja järgi
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     return candidates[:5]
 
@@ -175,42 +162,31 @@ def analyze_coin(symbol):
     print(f"   -> Analüüsin: {symbol}...")
     
     all_news = []
-
-    # 1. Küsime CryptoPanicust
+    
+    # 1. CryptoPanic (Scraperiga)
     cp_news = get_cryptopanic_news(symbol)
-    if cp_news:
-        all_news.extend(cp_news)
+    if cp_news: all_news.extend(cp_news)
 
-    # 2. Kui vähe uudiseid, küsime Yahoost lisa
+    # 2. Yahoo (Backup)
     if len(all_news) < 2:
         try:
-            yahoo_symbol = symbol.replace("/", "-")
-            ticker = yf.Ticker(yahoo_symbol)
-            y_news = ticker.news[:2]
-            for n in y_news:
-                all_news.append({
-                    'title': n.get('title'),
-                    'link': n.get('link') or n.get('url'),
-                    'source': 'Yahoo'
-                })
-        except:
-            pass
+            ticker = yf.Ticker(symbol.replace("/", "-"))
+            for n in ticker.news[:2]:
+                all_news.append({'title': n.get('title'), 'link': n.get('link') or n.get('url'), 'source': 'Yahoo'})
+        except: pass
 
     news_text = ""
     if all_news:
         for n in all_news:
-            title = n.get('title', 'Pealkiri puudub')
+            title = n.get('title', 'N/A')
             link = n.get('link', '#')
-            source = n.get('source', 'Unknown')
-            
-            # See rida on oluline Dashboardi jaoks (||| eraldaja)
+            # Logime dashboardi jaoks
             print(f"      > UUDIS: {title} ||| {link}")
-            news_text += f"- {title} (Allikas: {source})\n"
+            news_text += f"- {title}\n"
     else:
         print("      Uudiseid pole (Neutraalne).")
         news_text = "Uudiseid ei leitud."
 
-    # 3. AI Analüüs (Range režiim - ainult number)
     prompt = f"""
     Analüüsi krüptovaluutat {symbol}.
     Uudised:
@@ -219,7 +195,7 @@ def analyze_coin(symbol):
     Hinda ostupotentsiaali (0-100).
     OLULINE: Vasta AINULT järgmises vormingus:
     SKOOR: X
-    (kus X on number). Ära lisa muud teksti.
+    (kus X on number).
     """
     
     try:
@@ -230,22 +206,17 @@ def analyze_coin(symbol):
         )
         content = res.choices[0].message.content.strip()
         
-        # Otsime kindlat mustrit "SKOOR: 85"
         match = re.search(r'SKOOR:\s*(\d+)', content, re.IGNORECASE)
-        
         if match:
-            score = int(match.group(1))
-            score = min(score, 100) # Kaitse "2023" vastu
+            score = min(int(match.group(1)), 100)
         else:
-            # Fallback: otsime üksikut numbrit
             fallback = re.search(r'\b(\d{1,3})\b', content)
             score = int(fallback.group(1)) if fallback else 0
             if score > 100: score = 0
             
         print(f"      AI HINNE: {score}/100")
         return score
-    except Exception as e:
-        print(f"      Viga AI päringus: {e}")
+    except:
         return 0
 
 def trade(symbol):
@@ -254,17 +225,11 @@ def trade(symbol):
         if float(acc.buying_power) < 55:
             print("   -> Raha otsas! Ei saa osta.")
             return
-    except: 
-        pass
+    except: pass
 
     print(f"5. TEGIJA: Ostame {symbol} $50 eest.")
     try:
-        req = MarketOrderRequest(
-            symbol=symbol,
-            notional=50,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.GTC
-        )
+        req = MarketOrderRequest(symbol=symbol, notional=50, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
         trading_client.submit_order(req)
         print("   -> TEHTUD! Ostetud.")
     except Exception as e:
@@ -274,7 +239,6 @@ def run_cycle():
     manage_existing_positions()
     my_pos = get_clean_positions_list()
     candidates = get_candidates()
-    
     best_coin = None
     best_score = -1
 
@@ -283,7 +247,7 @@ def run_cycle():
         s = c['symbol']
         clean = s.replace("/", "").replace("-", "")
         if clean in my_pos:
-            print(f"   -> {s} on juba olemas. Jätan vahele.")
+            print(f"   -> {s} olemas. Skip.")
             continue
             
         score = analyze_coin(s)
