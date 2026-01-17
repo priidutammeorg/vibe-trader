@@ -35,7 +35,6 @@ def view_log():
         clean = line.strip()
         if not clean: continue
         
-        # Timestamp extract
         ts = ""
         msg = clean
         if clean.startswith("[") and "]" in clean:
@@ -45,12 +44,10 @@ def view_log():
 
         css, badge = classify_log_line(msg)
         
-        # Uudiste lingi loogika (uus)
+        # Lingi parsimine (eraldaja |||)
         link_html = ""
         if css == "card-news":
-            # Eemaldame "> UUDIS:" prefiksi
             raw_content = msg.replace("> UUDIS:", "").strip()
-            # Eraldame pealkirja ja lingi (kui on |||)
             if "|||" in raw_content:
                 parts = raw_content.split("|||")
                 title = parts[0].strip()
@@ -92,7 +89,7 @@ def view_log():
             .news-btn {{ display: inline-block; margin-top: 5px; background: #38bdf8; color: #000; padding: 4px 10px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: bold; }}
             
             .card-noise {{ border: none; background: transparent; padding: 4px 0; border-bottom: 1px solid #1e293b; opacity: 0.7; }}
-            .card-noise .time {{ display: none; }} /* Peidame müra kellaajad mobiilis ruumi säästmiseks */
+            .card-noise .time {{ display: none; }} 
             .card-noise .msg {{ font-size: 13px; color: #64748b; }}
             
             .nav {{ margin-top: 20px; text-align: center; }}
