@@ -13,27 +13,24 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 
-# --- 0. SÜSTEEMI TÄIUSTUSED (Time & Flush) ---
-# See funktsioon sunnib Pythonit igale reale kellaaega lisama
-# ja kirjutab info KOHE faili, et Dashboard ei hilineks.
+# --- 0. FORCE LOGGING ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
     kwargs['flush'] = True
     builtins.print(f"{now}", *args, **kwargs)
 
-# --- 1. SEADISTUS ---
+# --- 1. SETUP ---
 load_dotenv()
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key or not secret_key or not openai_key:
-    print("VIGA: API võtmed puudu (.env failist)!")
+    print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: FINAL VERSION ---")
+print("--- VIBE TRADER: STRICT MODE ---")
 
-# REEGLID
 TAKE_PROFIT_PCT = 10.0
 STOP_LOSS_PCT = -5.0
 MIN_SCORE_TO_BUY = 75
@@ -42,22 +39,19 @@ trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
 
-# --- 2. ABIFUNKTSIOONID ---
+# --- 2. HELPER FUNCTIONS ---
 def get_clean_positions_list():
-    """Tagastab nimekirja sümbolitest, mis meil on (ilma / ja - märkideta)"""
     try:
         positions = trading_client.get_all_positions()
         return [p.symbol.replace("/", "").replace("-", "") for p in positions]
     except:
         return []
 
-# --- 3. PORTFELLI HALDUR ---
 def manage_existing_positions():
     print("1. PORTFELL: Kontrollin seisu...")
     try:
         positions = trading_client.get_all_positions()
-    except Exception as e:
-        print(f"   Viga lugemisel: {e}")
+    except:
         return
 
     if not positions:
@@ -83,150 +77,141 @@ def close_position(symbol):
     except Exception as e:
         print(f"      Viga müügil: {e}")
 
-# --- 4. TURU SKANNER ---
 def get_candidates():
     print("2. SKANNER: Otsin turu liikujaid...")
-    search_params = GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE)
-    assets = trading_client.get_all_assets(search_params)
-    
-    ignore_list = ["USDT/USD", "USDC/USD", "DAI/USD", "TUSD/USD", "PAXG/USD", "USDP/USD", "WBTC/USD"]
-    
-    tradable_symbols = [
-        a.symbol for a in assets 
-        if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore_list
-    ]
-    
     try:
-        snapshots = data_client.get_crypto_snapshot(CryptoSnapshotRequest(symbol_or_symbols=tradable_symbols))
-    except Exception as e:
-        print(f"   Viga turuandmete laadimisel: {e}")
+        search_params = GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE)
+        assets = trading_client.get_all_assets(search_params)
+        ignore_list = ["USDT/USD", "USDC/USD", "DAI/USD", "TUSD/USD", "PAXG/USD", "WBTC/USD"]
+        tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore_list]
+        
+        snapshots = data_client.get_crypto_snapshot(CryptoSnapshotRequest(symbol_or_symbols=tradable))
+    except:
         return []
 
     candidates = []
-    for symbol, snapshot in snapshots.items():
-        if not snapshot.daily_bar: continue
-        open_price = snapshot.daily_bar.open
-        close_price = snapshot.daily_bar.close
-        if open_price == 0: continue
-        
-        change_pct = ((close_price - open_price) / open_price) * 100
-        candidates.append({
-            "symbol": symbol,
-            "change": change_pct,
-            "abs_change": abs(change_pct)
-        })
+    for s, snap in snapshots.items():
+        if not snap.daily_bar: continue
+        chg = ((snap.daily_bar.close - snap.daily_bar.open) / snap.daily_bar.open) * 100
+        candidates.append({"symbol": s, "change": chg, "abs_change": abs(chg)})
     
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     return candidates[:5]
 
-# --- 5. AI ANALÜÜS (Uudistega) ---
+# --- 3. FIX: ANALÜÜS JA LINGID ---
 def analyze_coin(symbol):
     print(f"   -> Analüüsin: {symbol}...")
+    
+    # 1. Proovime uudiseid saada
+    news_items = []
     try:
         yahoo_symbol = symbol.replace("/", "-")
         ticker = yf.Ticker(yahoo_symbol)
-        news = ticker.news[:3]
+        raw_news = ticker.news
+        if raw_news:
+            news_items = raw_news[:2]
     except:
-        return 0
-
-    if not news:
-        print("      Uudiseid pole (Neutraalne).")
-        return 40 
+        pass
 
     news_text = ""
-    for n in news:
-        title = n.get('title', 'Pealkiri puudub')
-        link = n.get('link', '#')
-        
-        # --- LOGIME UUDISE LINGI ---
-        # See rida on vajalik, et Dashboard saaks lingi kätte
-        print(f"      > UUDIS: {title} {link}") 
-        
-        news_text += f"- {title}\n"
+    if news_items:
+        for n in news_items:
+            title = n.get('title', 'Pealkiri puudub')
+            # YFinance linkide fix: otsime 'link' või 'url'
+            link = n.get('link') or n.get('url') or 'https://finance.yahoo.com'
+            
+            # Prindime logisse spetsiaalse märgistusega rea
+            print(f"      > UUDIS: {title} ||| {link}")
+            news_text += f"- {title}\n"
+    else:
+        print("      Uudiseid pole (Neutraalne).")
+        news_text = "Uudiseid ei leitud."
 
+    # 2. RANGEM AI PROMPT
     prompt = f"""
-    Analüüsi krüptovaluutat {symbol} lühiajaliselt (swing trade).
+    Analüüsi krüptovaluutat {symbol}.
     Uudised:
     {news_text}
     
-    Hinda ostupotentsiaali skaalal 0 kuni 100.
-    Vasta AINULT numbriga.
+    Hinda ostupotentsiaali (0-100).
+    OLULINE: Vasta AINULT järgmises vormingus:
+    SKOOR: X
+    (kus X on number). Ära lisa muud teksti.
     """
     
     try:
-        response = ai_client.chat.completions.create(
+        res = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=0.1
         )
-        content = response.choices[0].message.content.strip()
+        content = res.choices[0].message.content.strip()
         
-        # --- TURVALINE PARSIMINE ---
-        match = re.search(r'(\d+)', content)
+        # 3. RANGEM REGEX (Otsib kindlat mustrit "SKOOR: 85")
+        # See välistab kuupäevad jms jama
+        match = re.search(r'SKOOR:\s*(\d+)', content, re.IGNORECASE)
+        
         if match:
             score = int(match.group(1))
-            score = min(score, 100) # Max 100
+            score = min(score, 100) # Igaks juhuks piiraja
         else:
-            score = 0
+            # Fallback: kui AI eksis vorminguga, proovime leida väikest numbrit
+            fallback_match = re.search(r'\b(\d{1,3})\b', content)
+            if fallback_match:
+                 score = int(fallback_match.group(1))
+                 if score > 100: score = 0 # Kui ikka on aastaarv, siis 0
+            else:
+                score = 0
             
         print(f"      AI HINNE: {score}/100")
         return score
     except Exception as e:
-        print(f"      Viga AI päringus: {e}")
+        print(f"      Viga: {e}")
         return 0
 
-# --- 6. TEHINGU TEGEMINE ---
 def trade(symbol):
     try:
-        account = trading_client.get_account()
-        if float(account.buying_power) < 55:
-            print(f"   -> Raha otsas (${account.buying_power})! Ei saa osta.")
+        acc = trading_client.get_account()
+        if float(acc.buying_power) < 55:
+            print("   -> Raha otsas! Ei osta.")
             return
-    except:
-        pass
+    except: pass
 
     print(f"5. TEGIJA: Ostame {symbol} $50 eest.")
     try:
-        req = MarketOrderRequest(
-            symbol=symbol,
-            notional=50,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.GTC
-        )
+        req = MarketOrderRequest(symbol=symbol, notional=50, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
         trading_client.submit_order(req)
         print("   -> TEHTUD! Ostetud.")
-    except Exception as e:
-        print(f"   -> Viga ostul: {e}")
+    except:
+        print("   -> Viga ostul.")
 
-# --- 7. PEAMINE TÖÖVOOG ---
 def run_cycle():
     manage_existing_positions()
-    my_positions = get_clean_positions_list()
+    my_pos = get_clean_positions_list()
     candidates = get_candidates()
     
     best_coin = None
     best_score = -1
 
     print("4. AI ANALÜÜS: Valime parima...")
-    for coin in candidates:
-        sym = coin['symbol']
-        clean_sym = sym.replace("/", "").replace("-", "")
-        
-        if clean_sym in my_positions:
-            print(f"   -> {sym} on juba olemas. Jätan vahele.")
+    for c in candidates:
+        s = c['symbol']
+        clean = s.replace("/", "").replace("-", "")
+        if clean in my_pos:
+            print(f"   -> {s} olemas. Skip.")
             continue
             
-        score = analyze_coin(sym)
+        score = analyze_coin(s)
         if score > best_score:
             best_score = score
-            best_coin = coin
+            best_coin = c
 
     if best_coin and best_score >= MIN_SCORE_TO_BUY:
         print(f"--- VÕITJA: {best_coin['symbol']} (Skoor: {best_score}) ---")
         trade(best_coin['symbol'])
     else:
-        winner = best_coin['symbol'] if best_coin else "-"
-        print(f"--- TULEMUS: Parim oli {winner} ({best_score}p). Ei osta.")
+        w = best_coin['symbol'] if best_coin else "-"
+        print(f"--- TULEMUS: Parim {w} ({best_score}p). Ei osta.")
 
 if __name__ == "__main__":
     run_cycle()
