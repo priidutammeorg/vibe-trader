@@ -36,16 +36,14 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v14.1 (ROUNDING FIX) ---")
+print("--- VIBE TRADER: v15.0 (HEDGE FUND EDITION) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
-HARD_STOP_LOSS_PCT = -5.0  
-TRAILING_ACTIVATION = 4.0  
-TRAILING_DISTANCE = 1.5    
+TRAILING_ACTIVATION_ATR = 2.0  # Mitu korda ATR-i peab tõusma, et aktiveerida trailing
 MIN_VOLUME_USD = 100000    
-MAX_HOURLY_PUMP = 5.0
+MAX_HOURLY_PUMP = 6.0      
 MAX_AI_CALLS = 5           
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
@@ -70,12 +68,28 @@ def save_brain(brain_data):
     except:
         pass
 
-def update_high_watermark(symbol, current_price):
+def update_position_metadata(symbol, atr_value):
+    """Salvestame ATR väärtuse, et teada, kui kaugel stop hoida"""
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
     if symbol not in brain["positions"]:
-        brain["positions"][symbol] = {"highest_price": current_price}
+        brain["positions"][symbol] = {
+            "highest_price": 0, 
+            "atr_at_entry": atr_value # Salvestame volatiilsuse sisenemisel
+        }
+    save_brain(brain)
+
+def update_high_watermark(symbol, current_price):
+    brain = load_brain()
+    if "positions" not in brain: brain["positions"] = {}
+    
+    # Kui ATR puudub (vana positsioon), paneme vaikeväärtuse
+    if symbol in brain["positions"] and "atr_at_entry" not in brain["positions"][symbol]:
+         brain["positions"][symbol]["atr_at_entry"] = current_price * 0.05
+
+    if symbol not in brain["positions"]:
+        brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05}
     else:
         if current_price > brain["positions"][symbol]["highest_price"]:
             brain["positions"][symbol]["highest_price"] = current_price
@@ -84,9 +98,9 @@ def update_high_watermark(symbol, current_price):
     save_brain(brain)
     return False
 
-def get_high_watermark(symbol):
+def get_position_data(symbol):
     brain = load_brain()
-    return brain.get("positions", {}).get(symbol, {}).get("highest_price", 0)
+    return brain.get("positions", {}).get(symbol, {"highest_price": 0, "atr_at_entry": 0})
 
 def is_cooled_down(symbol):
     brain = load_brain()
@@ -106,7 +120,7 @@ def activate_cooldown(symbol):
 
 # --- 2. ANDMETÖÖTLUS (YAHOO) ---
 
-def get_yahoo_data(symbol, period="5d", interval="1h"):
+def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
         y_symbol = symbol.replace("/", "-")
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
@@ -131,8 +145,7 @@ def check_btc_pulse():
     sma50 = ta.trend.sma_indicator(df['close'], window=50).iloc[-1]
     if pd.isna(sma50): sma50 = current
     
-    open_price = df['open'].iloc[-1]
-    change = ((current - open_price) / open_price) * 100
+    change = ((current - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
     print(f"   BTC: ${current:.0f} | SMA50: ${sma50:.0f} | 24h: {change:.2f}%")
     
@@ -145,40 +158,67 @@ def get_technical_analysis(symbol):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
     
     if df is None or len(df) < 30:
-        return 50, 0, 0
+        return 50, 0, 0, 0 # Lisatud 0 ATR jaoks
     
     current_price = df['close'].iloc[-1]
     last_24h = df.tail(24)
     volume_24h = (last_24h['volume'] * last_24h['close']).sum()
     
-    last_candle_open = df['open'].iloc[-1]
-    hourly_change = ((current_price - last_candle_open) / last_candle_open) * 100
+    hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
+    # --- INDIKAATORID ---
+    
+    # 1. RSI
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     if pd.isna(rsi): rsi = 50
     
+    # 2. MACD
     macd_diff = ta.trend.macd_diff(df['close']).iloc[-1]
     
+    # 3. SMA Trend
     sma200 = ta.trend.sma_indicator(df['close'], window=200).iloc[-1]
     if pd.isna(sma200): sma200 = current_price
 
+    # 4. ADX (UUS!) - Trendi tugevus
+    adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
+    if pd.isna(adx): adx = 20
+
+    # 5. Bollinger Bands (UUS!)
+    bb_high = ta.volatility.bollinger_hband(df['close']).iloc[-1]
+    bb_low = ta.volatility.bollinger_lband(df['close']).iloc[-1]
+    
+    # 6. ATR (Volatility) (UUS!)
+    atr = ta.volatility.average_true_range(df['high'], df['low'], df['close']).iloc[-1]
+    if pd.isna(atr): atr = current_price * 0.05
+
+    # --- SKOORIMINE ---
     score = 50
     
-    if rsi < 30: score += 30
-    elif rsi < 45: score += 15
-    elif rsi > 75: score -= 40
-    elif rsi > 65: score -= 20
+    # RSI
+    if rsi < 30: score += 25
+    elif rsi < 45: score += 10
+    elif rsi > 70: score -= 30
     
+    # MACD
     if macd_diff > 0: score += 15
     else: score -= 10
     
+    # Trend
     if current_price > sma200: score += 10
+    
+    # ADX (Ainult tugev trend on hea)
+    if adx > 25: score += 5
+    elif adx < 15: score -= 5 # Liiga nõrk turg
+    
+    # Bollinger (Kas hind on kanali allosas = odav?)
+    if current_price <= (bb_low * 1.01): score += 15 # Väga hea ostukoht
+    elif current_price >= (bb_high * 0.99): score -= 15 # Liiga kallis
 
     if score >= 45:
         macd_str = "POS" if macd_diff > 0 else "NEG"
-        print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, 1h={hourly_change:.2f}%. Vol=${volume_24h/1000:.0f}k. Skoor: {score}")
+        print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, ADX={adx:.1f}. Vol=${volume_24h/1000:.0f}k. Skoor: {score}")
     
-    return max(0, min(100, score)), volume_24h, hourly_change
+    return max(0, min(100, score)), volume_24h, hourly_change, atr
 
 # --- 3. AI & UUDISED ---
 
@@ -211,10 +251,14 @@ def analyze_coin_ai(symbol):
     else: news_text = "Uudiseid pole."
 
     prompt = f"""
-    Analüüsi krüptoraha {symbol} lühiajalist (24h) potentsiaali.
+    Analüüsi krüptoraha {symbol} 24h potentsiaali.
     Uudised:
     {news_text}
-    Hinda 0-100. Ole kriitiline. Vasta AINULT: SKOOR: X
+    Hinda 0-100.
+    85-100: Väga tugev signaal (Partnerlus, Upgrade, Listing).
+    50-84: Positiivne.
+    0-49: Neutraalne/Negatiivne.
+    Vasta AINULT: SKOOR: X
     """
     try:
         res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
@@ -229,10 +273,10 @@ def analyze_coin_ai(symbol):
     save_brain(brain)
     return score
 
-# --- 4. HALDUS ---
+# --- 4. HALDUS (DYNAMIC ATR STOP) ---
 
 def manage_existing_positions():
-    print("1. PORTFELL: Trailing Stop loogika...")
+    print("1. PORTFELL: Dünaamiline ATR haldus...")
     try: positions = trading_client.get_all_positions()
     except: return
 
@@ -246,24 +290,33 @@ def manage_existing_positions():
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
-        hw = get_high_watermark(symbol)
+        # Laeme mälu andmed
+        pos_data = get_position_data(symbol)
+        hw = pos_data["highest_price"]
         if hw == 0: hw = entry_price
         
+        atr = pos_data["atr_at_entry"]
+        if atr == 0: atr = current_price * 0.05 # Fallback 5% kui ATR puudub
+        
+        # Uuenda tippu
         if current_price > hw:
             update_high_watermark(symbol, current_price)
-            hw = current_price 
+            hw = current_price
+            
+        # --- STRATEEGIA: ATR Trailing ---
+        # Stop on 2x ATR kaugusel tipust
+        stop_price = hw - (2.0 * atr)
         
-        if profit_pct >= TRAILING_ACTIVATION:
-            stop_price = hw * (1 - (TRAILING_DISTANCE / 100))
-            stop_type = "TRAILING 🎢"
-        else:
-            stop_price = entry_price * (1 + (HARD_STOP_LOSS_PCT / 100))
-            stop_type = "HARD 🛡️"
+        # Aga stop ei tohi kunagi olla madalamal kui algne hard stop (-5% entryst)
+        hard_stop = entry_price * 0.95
+        final_stop = max(stop_price, hard_stop)
+        
+        dist_to_stop = ((current_price - final_stop) / current_price) * 100
+        
+        print(f"   -> {symbol}: {profit_pct:.2f}% (Hind: ${current_price:.2f} | Stop: ${final_stop:.2f} | Puhver: {dist_to_stop:.2f}%)")
 
-        print(f"   -> {symbol}: {profit_pct:.2f}% (H: ${current_price:.2f} | Tipp: ${hw:.2f} | Stop: ${stop_price:.2f} {stop_type})")
-
-        if current_price <= stop_price:
-            print(f"      !!! STOP HIT ({stop_type})! Müün {symbol}...")
+        if current_price <= final_stop:
+            print(f"      !!! ATR STOP HIT! Müün {symbol}...")
             close_position(symbol)
 
 def close_position(symbol):
@@ -273,27 +326,30 @@ def close_position(symbol):
         print(f"      TEHTUD! {symbol} müüdud.")
     except Exception as e: print(f"Viga: {e}")
 
-def trade(symbol, score):
+def trade(symbol, score, atr):
     try: equity = float(trading_client.get_account().equity)
     except: return
 
     if equity < 50: return
     
+    # Kelly kriteerium (light) - mida parem skoor, seda suurem panus
     if score >= 90: size_pct = 0.08
     elif score >= 80: size_pct = 0.06
     else: size_pct = 0.04
     
     amount = equity * size_pct
     amount = max(amount, 10)
-    
-    # --- FIX: Ümardamine 2 kohani, et Alpaca ei nutaks ---
     amount = round(amount, 2)
     
-    print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} eest (Skoor {score} -> {size_pct*100}%).")
+    print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} eest (Skoor {score}).")
     try:
         req = MarketOrderRequest(symbol=symbol, notional=amount, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
         trading_client.submit_order(req)
-        update_high_watermark(symbol, 0.000001)
+        
+        # Salvestame kohe ATR info mällu, et teaksime, kuhu stop panna
+        update_position_metadata(symbol, atr)
+        update_high_watermark(symbol, 0.000001) # Init HW
+        
         print("   -> TEHTUD! Ostetud.")
     except Exception as e:
         print(f"   -> Viga ostul: {e}")
@@ -315,16 +371,16 @@ def run_cycle():
         if not snap.daily_bar or snap.daily_bar.open == 0: continue
         chg = ((snap.daily_bar.close - snap.daily_bar.open) / snap.daily_bar.open) * 100
         candidates.append({"symbol": s, "change": chg, "abs_change": abs(chg)})
-    
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     
     my_pos = [p.symbol.replace("/", "").replace("-", "") for p in trading_client.get_all_positions()]
     best_coin = None
     best_final_score = -1
+    best_atr = 0
     ai_calls_made = 0
     
     total_coins = len(candidates)
-    print(f"   -> Leidsin {total_coins} münti. Alustan täppis-skaneerimist (Yahoo)...")
+    print(f"   -> Leidsin {total_coins} münti. Alustan Hedge Fund analüüsi...")
 
     for i, c in enumerate(candidates):
         s = c['symbol']
@@ -332,18 +388,19 @@ def run_cycle():
         
         if clean in my_pos or not is_cooled_down(s): continue
 
-        time.sleep(0.5)
+        time.sleep(0.5) 
         
         print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
 
-        tech_score, volume, hourly_chg = get_technical_analysis(s)
+        # 1. TECH (ATR, ADX, BOLLINGER)
+        tech_score, volume, hourly_chg, atr = get_technical_analysis(s)
         
         if volume < MIN_VOLUME_USD: continue 
         if hourly_chg > MAX_HOURLY_PUMP: continue
         if tech_score < 45: continue 
 
         if ai_calls_made >= MAX_AI_CALLS:
-            print("   ⚠️ AI limiit täis. Lõpetan otsingu parima leitud kandidaadiga.")
+            print("   ⚠️ AI limiit täis.")
             break
             
         print(f"   🔥 LEID: {s} on kuum (Tech: {tech_score}). Küsin AI-lt...")
@@ -356,12 +413,13 @@ def run_cycle():
         if final_score > best_final_score:
             best_final_score = final_score
             best_coin = c
+            best_atr = atr
 
     if best_coin and best_final_score >= MIN_FINAL_SCORE:
         print(f"--- VÕITJA: {best_coin['symbol']} (Skoor: {best_final_score:.1f}) ---")
-        trade(best_coin['symbol'], best_final_score)
+        trade(best_coin['symbol'], best_final_score, best_atr)
     else:
-        print(f"--- TULEMUS: Skaneerisin turgu. Parim {best_coin['symbol'] if best_coin else '-'} ei ületanud lävendit.")
+        print(f"--- TULEMUS: Parim {best_coin['symbol'] if best_coin else '-'} ei ületanud lävendit.")
 
 if __name__ == "__main__":
     run_cycle()
