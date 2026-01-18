@@ -11,7 +11,7 @@ import ta
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetAssetsRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest
+from alpaca.trading.requests import GetAssetsRequest, MarketOrderRequest
 from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest, CryptoBarsRequest
@@ -36,7 +36,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v10.0 (PROFESSIONAL) ---")
+print("--- VIBE TRADER: v10.1 (NAN FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 70
@@ -103,23 +103,41 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. TURU TERVIS ---
+# --- 2. TURU TERVIS (FIXED LIMITS) ---
 
-def get_market_data(symbol, timeframe=TimeFrame.Hour, limit=200):
+def get_market_data(symbol, timeframe=TimeFrame.Hour, limit=300):
+    """Tõmbab turuandmeid (Suurendatud limiit 200->300 'nan' vältimiseks)"""
     try:
         req = CryptoBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, limit=limit)
-        return data_client.get_crypto_bars(req).df
+        bars = data_client.get_crypto_bars(req)
+        return bars.df if not bars.df.empty else None
     except: return None
 
 def check_btc_pulse():
     print("🔍 Tervisekontroll: BTC Pulss...")
-    df = get_market_data("BTC/USD", TimeFrame.Day, 60)
-    if df is None or df.empty: return True
+    # Küsime rohkem andmeid (200 päeva), et SMA50 kindlalt töötaks
+    df = get_market_data("BTC/USD", TimeFrame.Day, 200)
+    
+    if df is None or df.empty: 
+        print("   ⚠️ BTC andmed puuduvad. Jätkan ettevaatlikult.")
+        return True
     
     current = df['close'].iloc[-1]
-    sma50 = ta.trend.sma_indicator(df['close'], window=50).iloc[-1]
+    
+    # SMA50 arvutus (vajab vähemalt 50 punkti)
+    sma50_series = ta.trend.sma_indicator(df['close'], window=50)
+    
+    # Kontrollime, kas SMA arvutus õnnestus (pole NaN)
+    if sma50_series.isnull().all():
+        print("   ⚠️ Liiga vähe ajalugu SMA50 jaoks. Jätkan.")
+        return True
+        
+    sma50 = sma50_series.iloc[-1]
     change = ((current - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
+    # Kui SMA on ikka nan (nt värske data puudujääk), asendame hinnaga
+    if pd.isna(sma50): sma50 = current
+
     print(f"   BTC: ${current:.0f} | SMA50: ${sma50:.0f} | 24h: {change:.2f}%")
     
     if current < (sma50 * 0.96) or change < -4.5:
@@ -128,7 +146,8 @@ def check_btc_pulse():
     return True
 
 def get_technical_analysis(symbol):
-    df = get_market_data(symbol, TimeFrame.Hour, 100)
+    # Küsime 300 tundi ajalugu
+    df = get_market_data(symbol, TimeFrame.Hour, 300)
     if df is None or df.empty: return 50, 0 # Score, Volume
     
     # 1. Volume Check
@@ -136,9 +155,11 @@ def get_technical_analysis(symbol):
     
     # 2. RSI
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
+    if pd.isna(rsi): rsi = 50 # Fallback
     
-    # 3. SMA Trend
-    sma200 = ta.trend.sma_indicator(df['close'], window=200).iloc[-1] if len(df) >= 200 else 0
+    # 3. SMA Trend (SMA200)
+    sma200_series = ta.trend.sma_indicator(df['close'], window=200)
+    sma200 = sma200_series.iloc[-1] if not sma200_series.isnull().all() else 0
     price = df['close'].iloc[-1]
 
     score = 50
@@ -214,19 +235,15 @@ def manage_existing_positions():
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
-        # 1. Uuenda "High Watermark" (Tipphinda)
-        # Kui mälu on tühi, alusta entry hinnast
+        # 1. Uuenda "High Watermark"
         hw = get_high_watermark(symbol)
         if hw == 0: hw = entry_price
         
         if current_price > hw:
             update_high_watermark(symbol, current_price)
-            hw = current_price # Uus tipp
+            hw = current_price 
         
         # 2. Arvuta Trailing Stop tase
-        # Kui kasum > 5%, siis stop on tipust 2% allpool
-        # Kui kasum < 5%, siis stop on fikseeritud -5% entryst (Hard Stop)
-        
         if profit_pct >= TRAILING_ACTIVATION:
             stop_price = hw * (1 - (TRAILING_DISTANCE / 100))
             stop_type = "TRAILING 🎢"
@@ -255,7 +272,7 @@ def trade(symbol, score):
 
     if equity < 50: return
     
-    # SMART SIZING (POKER PLAYER)
+    # SMART SIZING
     if score >= 90: size_pct = 0.08   # 8%
     elif score >= 80: size_pct = 0.06 # 6%
     else: size_pct = 0.04             # 4%
@@ -311,7 +328,6 @@ def run_cycle():
         # A. Tehniline + Volume
         tech_score, volume = get_technical_analysis(s)
         
-        # Likviidsuskontroll (Anti-Scam)
         if volume < MIN_VOLUME_USD:
             print(f"      ❌ Liiga väike maht (${volume/1000:.0f}k). Riskantne.")
             continue
