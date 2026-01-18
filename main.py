@@ -36,15 +36,15 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v10.1 (NAN FIX) ---")
+print("--- VIBE TRADER: v10.2 (DATA FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 70
 COOL_DOWN_HOURS = 12
-HARD_STOP_LOSS_PCT = -5.0  # Algsne kaitse
-TRAILING_ACTIVATION = 5.0  # Kui kasum > 5%, hakka jälitama
-TRAILING_DISTANCE = 2.0    # Jälita hinda 2% kauguselt
-MIN_VOLUME_USD = 500000    # Väldi münte, mille käive on alla 500k
+HARD_STOP_LOSS_PCT = -5.0
+TRAILING_ACTIVATION = 5.0
+TRAILING_DISTANCE = 2.0
+MIN_VOLUME_USD = 100000 # Alandasime veidi piiri, et välistada ainult täielik rämps
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
@@ -54,30 +54,25 @@ ai_client = OpenAI(api_key=openai_key)
 
 def load_brain():
     if os.path.exists(BRAIN_FILE):
-        try:
-            with open(BRAIN_FILE, 'r') as f: return json.load(f)
+        try: with open(BRAIN_FILE, 'r') as f: return json.load(f)
         except: return {}
     return {}
 
 def save_brain(brain_data):
-    try:
-        with open(BRAIN_FILE, 'w') as f: json.dump(brain_data, f, indent=4)
+    try: with open(BRAIN_FILE, 'w') as f: json.dump(brain_data, f, indent=4)
     except: pass
 
 def update_high_watermark(symbol, current_price):
-    """Salvestab positsiooni kõrgeima hinna Trailing Stopi jaoks"""
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
-    # Kui pole varem salvestatud, alusta praegusest
     if symbol not in brain["positions"]:
         brain["positions"][symbol] = {"highest_price": current_price}
     else:
-        # Uuenda ainult siis, kui hind on kõrgem
         if current_price > brain["positions"][symbol]["highest_price"]:
             brain["positions"][symbol]["highest_price"] = current_price
             save_brain(brain)
-            return True # Uus tipp!
+            return True
     save_brain(brain)
     return False
 
@@ -98,69 +93,87 @@ def activate_cooldown(symbol):
     brain = load_brain()
     if "cool_down" not in brain: brain["cool_down"] = {}
     brain["cool_down"][symbol] = datetime.now().timestamp()
-    # Kustutame positsiooni info mälust
     if "positions" in brain and symbol in brain["positions"]:
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. TURU TERVIS (FIXED LIMITS) ---
+# --- 2. ANDMETÖÖTLUS (FIXED) ---
 
-def get_market_data(symbol, timeframe=TimeFrame.Hour, limit=300):
-    """Tõmbab turuandmeid (Suurendatud limiit 200->300 'nan' vältimiseks)"""
+def get_clean_dataframe(symbol, timeframe, limit):
+    """Tõmbab ja PUHASTAB andmed"""
     try:
         req = CryptoBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, limit=limit)
         bars = data_client.get_crypto_bars(req)
-        return bars.df if not bars.df.empty else None
-    except: return None
+        df = bars.df
+        
+        if df.empty: return None
+        
+        # Alpaca tagastab multi-indeksi (symbol, timestamp). Teeme selle lihtsaks.
+        df = df.reset_index() 
+        
+        # Filtreerime ainult konkreetse sümboli andmed (igaks juhuks)
+        df = df[df['symbol'] == symbol].copy()
+        
+        # Eemaldame tühjad read
+        df = df.dropna()
+        
+        # Kontrollime, kas andmeid jäi alles
+        if len(df) < 10: return None
+        
+        return df
+    except Exception as e:
+        # print(f"      Viga andmete laadimisel {symbol}: {e}") # Debugging
+        return None
 
 def check_btc_pulse():
     print("🔍 Tervisekontroll: BTC Pulss...")
-    # Küsime rohkem andmeid (200 päeva), et SMA50 kindlalt töötaks
-    df = get_market_data("BTC/USD", TimeFrame.Day, 200)
+    df = get_clean_dataframe("BTC/USD", TimeFrame.Day, 100)
     
-    if df is None or df.empty: 
+    if df is None:
         print("   ⚠️ BTC andmed puuduvad. Jätkan ettevaatlikult.")
         return True
     
     current = df['close'].iloc[-1]
     
-    # SMA50 arvutus (vajab vähemalt 50 punkti)
+    # SMA50
     sma50_series = ta.trend.sma_indicator(df['close'], window=50)
-    
-    # Kontrollime, kas SMA arvutus õnnestus (pole NaN)
-    if sma50_series.isnull().all():
-        print("   ⚠️ Liiga vähe ajalugu SMA50 jaoks. Jätkan.")
-        return True
-        
     sma50 = sma50_series.iloc[-1]
-    change = ((current - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
-    # Kui SMA on ikka nan (nt värske data puudujääk), asendame hinnaga
+    # Kui SMA on nan (alguses), kasutame hinda ennast
     if pd.isna(sma50): sma50 = current
 
+    open_price = df['open'].iloc[-1]
+    change = ((current - open_price) / open_price) * 100
+    
     print(f"   BTC: ${current:.0f} | SMA50: ${sma50:.0f} | 24h: {change:.2f}%")
     
     if current < (sma50 * 0.96) or change < -4.5:
-        print("   ⛔ TURG ON OHTLIK. Ootan paremaid aegu.")
+        print("   ⛔ TURG ON OHTLIK. Ootan.")
         return False
     return True
 
 def get_technical_analysis(symbol):
-    # Küsime 300 tundi ajalugu
-    df = get_market_data(symbol, TimeFrame.Hour, 300)
-    if df is None or df.empty: return 50, 0 # Score, Volume
+    df = get_clean_dataframe(symbol, TimeFrame.Hour, 300)
     
-    # 1. Volume Check
-    volume_24h = (df['volume'] * df['close']).sum() / (len(df)/24) # Approx daily val
+    if df is None:
+        return 50, 0 # Andmed katki, neutraalne
+    
+    # 1. Volume Check (Viimase 24h keskmine)
+    # Võtame viimased 24 rida
+    last_24h = df.tail(24)
+    volume_24h = (last_24h['volume'] * last_24h['close']).sum()
     
     # 2. RSI
-    rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
-    if pd.isna(rsi): rsi = 50 # Fallback
+    rsi_series = ta.momentum.rsi(df['close'], window=14)
+    rsi = rsi_series.iloc[-1]
+    if pd.isna(rsi): rsi = 50
     
-    # 3. SMA Trend (SMA200)
+    # 3. SMA Trend
     sma200_series = ta.trend.sma_indicator(df['close'], window=200)
-    sma200 = sma200_series.iloc[-1] if not sma200_series.isnull().all() else 0
+    sma200 = sma200_series.iloc[-1]
     price = df['close'].iloc[-1]
+    
+    if pd.isna(sma200): sma200 = price # Fallback
 
     score = 50
     if rsi < 30: score += 40
@@ -168,7 +181,7 @@ def get_technical_analysis(symbol):
     elif rsi > 75: score -= 40
     elif rsi > 65: score -= 20
     
-    if sma200 > 0 and price > sma200: score += 10
+    if price > sma200: score += 10
 
     print(f"      📊 TECH: RSI={rsi:.1f}, Hind>{'SMA' if price>sma200 else 'ALL'}. Vol=${volume_24h/1000:.0f}k")
     return max(0, min(100, score)), volume_24h
@@ -217,12 +230,11 @@ def analyze_coin_ai(symbol):
     save_brain(brain)
     return score
 
-# --- 4. HALDUS (TRAILING STOP) ---
+# --- 4. HALDUS ---
 
 def manage_existing_positions():
     print("1. PORTFELL: Trailing Stop loogika...")
-    try:
-        positions = trading_client.get_all_positions()
+    try: positions = trading_client.get_all_positions()
     except: return
 
     if not positions:
@@ -235,7 +247,6 @@ def manage_existing_positions():
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
-        # 1. Uuenda "High Watermark"
         hw = get_high_watermark(symbol)
         if hw == 0: hw = entry_price
         
@@ -243,7 +254,6 @@ def manage_existing_positions():
             update_high_watermark(symbol, current_price)
             hw = current_price 
         
-        # 2. Arvuta Trailing Stop tase
         if profit_pct >= TRAILING_ACTIVATION:
             stop_price = hw * (1 - (TRAILING_DISTANCE / 100))
             stop_type = "TRAILING 🎢"
@@ -253,7 +263,6 @@ def manage_existing_positions():
 
         print(f"   -> {symbol}: {profit_pct:.2f}% (Hind: ${current_price:.2f} | Tipp: ${hw:.2f} | Stop: ${stop_price:.2f} {stop_type})")
 
-        # 3. Kontrolli müüki
         if current_price <= stop_price:
             print(f"      !!! STOP HIT ({stop_type})! Müün {symbol}...")
             close_position(symbol)
@@ -266,25 +275,23 @@ def close_position(symbol):
     except Exception as e: print(f"Viga: {e}")
 
 def trade(symbol, score):
-    try:
-        equity = float(trading_client.get_account().equity)
+    try: equity = float(trading_client.get_account().equity)
     except: return
 
     if equity < 50: return
     
-    # SMART SIZING
-    if score >= 90: size_pct = 0.08   # 8%
-    elif score >= 80: size_pct = 0.06 # 6%
-    else: size_pct = 0.04             # 4%
+    if score >= 90: size_pct = 0.08
+    elif score >= 80: size_pct = 0.06
+    else: size_pct = 0.04
     
     amount = equity * size_pct
     amount = max(amount, 10)
     
-    print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} eest (Skoor {score} -> {size_pct*100}% portfellist).")
+    print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} eest (Skoor {score}).")
     try:
         req = MarketOrderRequest(symbol=symbol, notional=amount, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
         trading_client.submit_order(req)
-        update_high_watermark(symbol, 0.000001) # Init memory
+        update_high_watermark(symbol, 0.000001)
         print("   -> TEHTUD! Ostetud.")
     except Exception as e:
         print(f"   -> Viga ostul: {e}")
@@ -325,7 +332,6 @@ def run_cycle():
 
         print(f"   -> Analüüsin: {s}...")
         
-        # A. Tehniline + Volume
         tech_score, volume = get_technical_analysis(s)
         
         if volume < MIN_VOLUME_USD:
@@ -336,10 +342,8 @@ def run_cycle():
             print(f"      ❌ Tehniliselt nõrk ({tech_score}). Skip.")
             continue
 
-        # B. AI
         ai_score = analyze_coin_ai(s)
         
-        # C. Lõpphinne
         final_score = (ai_score * 0.6) + (tech_score * 0.4)
         print(f"      🏁 LÕPPHINNE: {final_score:.1f}")
 
