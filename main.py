@@ -37,7 +37,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v18.5 (VOLUME FALLBACK FIX) ---")
+print("--- VIBE TRADER: v18.7 (YAHOO CHILL MODE) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
@@ -117,7 +117,7 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS ---
+# --- 2. ANDMETÖÖTLUS (FIXED & SLOWED) ---
 
 def format_symbol_for_yahoo(symbol):
     s = symbol.replace("/", "")
@@ -127,18 +127,24 @@ def format_symbol_for_yahoo(symbol):
     if "SHIB" in s: return "SHIB-USD"
     if "WIF" in s: return "WIF-USD"
     if "BONK" in s: return "BONK-USD"
-    
     if s.endswith("USD"): return s[:-3] + "-USD"
     return s + "-USD"
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
         y_symbol = format_symbol_for_yahoo(symbol)
-        df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         
-        if df.empty: return None
+        # FIX: Püüame kinni tühjad vastused ja vead
+        try:
+            df = yf.download(y_symbol, period=period, interval=interval, progress=False, threads=False)
+        except Exception:
+            return None
+        
+        if df is None or df.empty: return None
+        
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
+        
         if 'close' not in df.columns: return None
         return df.dropna()
     except: return None
@@ -159,18 +165,14 @@ def check_btc_pulse():
 
 def get_technical_analysis(symbol, alpaca_volume_usd):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
-    # Kui Yahoo andmeid pole, ei saa midagi teha
     if df is None or len(df) < 30: return 50, 0, 0, 0, 0
     
     current_price = df['close'].iloc[-1]
     
-    # --- UUS: Yahoo Volume Check ---
-    # Kui Alpaca andis 0, võtame Yahoo mahu
     yahoo_vol_usd = 0
     if 'volume' in df.columns:
         yahoo_vol_usd = df['volume'].iloc[-1] * current_price
     
-    # Kasutame suuremat kahest (Alpaca vs Yahoo)
     final_vol_usd = max(alpaca_volume_usd, yahoo_vol_usd)
 
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
@@ -234,7 +236,7 @@ def analyze_coin_ai(symbol):
             news_text += f"PEALKIRI: {n['title']}\n"
     else: news_text = "Uudiseid pole."
 
-    prompt = f"Analüüsi {symbol} 24h potentsiaali. Uudised:\n{news_text}\nHinda 0-100. Vasta AINULT: SKOOR: X"
+    prompt = f"Analüüsi {symbol} 24h potentsiaali. Uudised:\n{news_text}\nHinda 0-100. Ole kriitiline. Vasta AINULT: SKOOR: X"
     try:
         res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
         match = re.search(r'SKOOR:\s*(\d+)', res.choices[0].message.content)
@@ -260,15 +262,25 @@ def manage_existing_positions():
 
     for p in positions:
         symbol = p.symbol
+        
+        # --- PAUS SIIN ON KRIITILINE ---
+        # Ootame 2 sekundit iga mündi vahel, et Yahoo meid ei blokeeriks
+        time.sleep(2.0)
+        
         entry_price = float(p.avg_entry_price)
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
+        # Küsime andmeid ettevaatlikult
         df = get_yahoo_data(symbol, period="5d", interval="1h")
+        
         current_rsi = 50
         if df is not None:
              current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
              if pd.isna(current_rsi): current_rsi = 50
+        else:
+             # Kui andmed puuduvad, kasutame vaikimisi väärtust, mitte ei krahhi
+             pass 
 
         pos_data = get_position_data(symbol)
         hw = pos_data.get("highest_price", 0)
@@ -377,20 +389,15 @@ def run_cycle():
             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Jahutusel.")
             continue
 
-        # UUS LOOGIKA: Kui Alpaca maht on 0 (või alla miinimumi), siis me EI SKIPPI
-        # Me laseme selle läbi ja kontrollime Yahoo käest
         check_volume_later = False
         if alpaca_vol < MIN_VOLUME_USD: 
              check_volume_later = True
-             # Me ei prindi siin veel SKIP, vaid vaatame, mida Yahoo ütleb
              
         time.sleep(0.5) 
         print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
         
-        # Anname Alpaca mahu kaasa
         tech_score, hourly_chg, atr, rsi, final_vol = get_technical_analysis(s, alpaca_vol)
         
-        # NÜÜD kontrollime tegelikku mahtu (Alpaca vs Yahoo suurim)
         if final_vol < MIN_VOLUME_USD:
              print(f"      [SKIP] {s} - Maht ikkagi liiga väike (${final_vol/1000:.1f}k).")
              continue
