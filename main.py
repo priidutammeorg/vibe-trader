@@ -36,15 +36,15 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v15.0 (HEDGE FUND EDITION) ---")
+print("--- VIBE TRADER: v15.2 (HIGH BANDWIDTH) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
-TRAILING_ACTIVATION_ATR = 2.0  # Mitu korda ATR-i peab tõusma, et aktiveerida trailing
+TRAILING_ACTIVATION_ATR = 2.0 
 MIN_VOLUME_USD = 100000    
 MAX_HOURLY_PUMP = 6.0      
-MAX_AI_CALLS = 5           
+MAX_AI_CALLS = 10          # TÕSTETUD! Nüüd analüüsime 10 münti tsükli kohta.
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
@@ -69,25 +69,23 @@ def save_brain(brain_data):
         pass
 
 def update_position_metadata(symbol, atr_value):
-    """Salvestame ATR väärtuse, et teada, kui kaugel stop hoida"""
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
     if symbol not in brain["positions"]:
         brain["positions"][symbol] = {
             "highest_price": 0, 
-            "atr_at_entry": atr_value # Salvestame volatiilsuse sisenemisel
+            "atr_at_entry": atr_value 
         }
+    else:
+        brain["positions"][symbol]["atr_at_entry"] = atr_value
+        
     save_brain(brain)
 
 def update_high_watermark(symbol, current_price):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
-    # Kui ATR puudub (vana positsioon), paneme vaikeväärtuse
-    if symbol in brain["positions"] and "atr_at_entry" not in brain["positions"][symbol]:
-         brain["positions"][symbol]["atr_at_entry"] = current_price * 0.05
-
     if symbol not in brain["positions"]:
         brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05}
     else:
@@ -100,7 +98,7 @@ def update_high_watermark(symbol, current_price):
 
 def get_position_data(symbol):
     brain = load_brain()
-    return brain.get("positions", {}).get(symbol, {"highest_price": 0, "atr_at_entry": 0})
+    return brain.get("positions", {}).get(symbol, {})
 
 def is_cooled_down(symbol):
     brain = load_brain()
@@ -158,7 +156,7 @@ def get_technical_analysis(symbol):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
     
     if df is None or len(df) < 30:
-        return 50, 0, 0, 0 # Lisatud 0 ATR jaoks
+        return 50, 0, 0, 0 
     
     current_price = df['close'].iloc[-1]
     last_24h = df.tail(24)
@@ -167,52 +165,40 @@ def get_technical_analysis(symbol):
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
     # --- INDIKAATORID ---
-    
-    # 1. RSI
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     if pd.isna(rsi): rsi = 50
     
-    # 2. MACD
     macd_diff = ta.trend.macd_diff(df['close']).iloc[-1]
     
-    # 3. SMA Trend
     sma200 = ta.trend.sma_indicator(df['close'], window=200).iloc[-1]
     if pd.isna(sma200): sma200 = current_price
 
-    # 4. ADX (UUS!) - Trendi tugevus
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
     if pd.isna(adx): adx = 20
 
-    # 5. Bollinger Bands (UUS!)
     bb_high = ta.volatility.bollinger_hband(df['close']).iloc[-1]
     bb_low = ta.volatility.bollinger_lband(df['close']).iloc[-1]
     
-    # 6. ATR (Volatility) (UUS!)
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close']).iloc[-1]
     if pd.isna(atr): atr = current_price * 0.05
 
     # --- SKOORIMINE ---
     score = 50
     
-    # RSI
     if rsi < 30: score += 25
     elif rsi < 45: score += 10
     elif rsi > 70: score -= 30
     
-    # MACD
     if macd_diff > 0: score += 15
     else: score -= 10
     
-    # Trend
     if current_price > sma200: score += 10
     
-    # ADX (Ainult tugev trend on hea)
     if adx > 25: score += 5
-    elif adx < 15: score -= 5 # Liiga nõrk turg
+    elif adx < 15: score -= 5 
     
-    # Bollinger (Kas hind on kanali allosas = odav?)
-    if current_price <= (bb_low * 1.01): score += 15 # Väga hea ostukoht
-    elif current_price >= (bb_high * 0.99): score -= 15 # Liiga kallis
+    if current_price <= (bb_low * 1.01): score += 15 
+    elif current_price >= (bb_high * 0.99): score -= 15 
 
     if score >= 45:
         macd_str = "POS" if macd_diff > 0 else "NEG"
@@ -273,7 +259,7 @@ def analyze_coin_ai(symbol):
     save_brain(brain)
     return score
 
-# --- 4. HALDUS (DYNAMIC ATR STOP) ---
+# --- 4. HALDUS ---
 
 def manage_existing_positions():
     print("1. PORTFELL: Dünaamiline ATR haldus...")
@@ -290,24 +276,18 @@ def manage_existing_positions():
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
-        # Laeme mälu andmed
         pos_data = get_position_data(symbol)
-        hw = pos_data["highest_price"]
+        hw = pos_data.get("highest_price", 0)
         if hw == 0: hw = entry_price
         
-        atr = pos_data["atr_at_entry"]
-        if atr == 0: atr = current_price * 0.05 # Fallback 5% kui ATR puudub
+        atr = pos_data.get("atr_at_entry", 0)
+        if atr == 0: atr = current_price * 0.05 
         
-        # Uuenda tippu
         if current_price > hw:
             update_high_watermark(symbol, current_price)
             hw = current_price
             
-        # --- STRATEEGIA: ATR Trailing ---
-        # Stop on 2x ATR kaugusel tipust
         stop_price = hw - (2.0 * atr)
-        
-        # Aga stop ei tohi kunagi olla madalamal kui algne hard stop (-5% entryst)
         hard_stop = entry_price * 0.95
         final_stop = max(stop_price, hard_stop)
         
@@ -332,7 +312,6 @@ def trade(symbol, score, atr):
 
     if equity < 50: return
     
-    # Kelly kriteerium (light) - mida parem skoor, seda suurem panus
     if score >= 90: size_pct = 0.08
     elif score >= 80: size_pct = 0.06
     else: size_pct = 0.04
@@ -346,9 +325,8 @@ def trade(symbol, score, atr):
         req = MarketOrderRequest(symbol=symbol, notional=amount, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
         trading_client.submit_order(req)
         
-        # Salvestame kohe ATR info mällu, et teaksime, kuhu stop panna
         update_position_metadata(symbol, atr)
-        update_high_watermark(symbol, 0.000001) # Init HW
+        update_high_watermark(symbol, 0.000001)
         
         print("   -> TEHTUD! Ostetud.")
     except Exception as e:
@@ -392,7 +370,6 @@ def run_cycle():
         
         print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
 
-        # 1. TECH (ATR, ADX, BOLLINGER)
         tech_score, volume, hourly_chg, atr = get_technical_analysis(s)
         
         if volume < MIN_VOLUME_USD: continue 
