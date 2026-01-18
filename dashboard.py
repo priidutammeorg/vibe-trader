@@ -1,113 +1,117 @@
-from flask import Flask, request
+from flask import Flask
 import os
-import math
 import re
 
 app = Flask(__name__)
-LOG_FILE = "/root/vibe-trader/bot.log"
-LINES_PER_PAGE = 100
+LOG_FILE = "bot.log"
 
-def classify_log_line(line):
-    lower = line.lower()
-    if "võitja" in lower or "ostame" in lower or "tehtud! ostetud" in lower: return "card-buy", "🚀 OST"
-    if "kasum" in lower or "müün" in lower or "tehtud! müüdud" in lower: return "card-sell", "💰 MÜÜK"
-    if "kahjum" in lower: return "card-loss", "🔻 STOP"
-    if "> uudis:" in lower: return "card-news", "📰 UUDIS"
-    if "raha otsas" in lower: return "card-warning", "⚠️ RAHA"
-    return "card-noise", ""
-
-@app.route("/")
-def view_log():
-    lines = []
-    if os.path.exists(LOG_FILE):
-        try:
-            with open(LOG_FILE, "r", encoding="utf-8") as f: lines = f.readlines()
-        except:
-            with open(LOG_FILE, "r", encoding="latin-1") as f: lines = f.readlines()
-        lines = lines[::-1]
-
-    total_pages = math.ceil(len(lines) / LINES_PER_PAGE) or 1
-    page = request.args.get('page', 1, type=int)
-    if page < 1: page = 1
-    if page > total_pages: page = total_pages
-
-    current_lines = lines[(page-1)*LINES_PER_PAGE : page*LINES_PER_PAGE]
-
-    feed_html = ""
-    for line in current_lines:
-        clean = line.strip()
-        if not clean: continue
+def get_log_content():
+    if not os.path.exists(LOG_FILE):
+        return []
+    
+    with open(LOG_FILE, 'r') as f:
+        lines = f.readlines()
+    
+    cycles = []
+    current_cycle = []
+    
+    for line in reversed(lines):
+        clean_line = line.strip()
+        if not clean_line: continue
         
-        ts = ""
-        msg = clean
-        if clean.startswith("[") and "]" in clean:
-            end = clean.find("]")
-            ts = clean[1:end]
-            msg = clean[end+1:].strip()
+        match = re.match(r'^\[(.*?)] (.*)', clean_line)
+        if match:
+            ts = match.group(1)
+            msg = match.group(2)
+        else:
+            ts = "-"
+            msg = clean_line
 
-        css, badge = classify_log_line(msg)
+        if "========== TSÜKKEL START ==========" in msg:
+            if current_cycle:
+                cycles.append(current_cycle)
+                current_cycle = []
+            continue
+            
+        if "========== TSÜKKEL LÕPP ==========" in msg:
+            continue
+
+        row_class = "msg-info"
+        if "TEGIJA: Ostame" in msg or "TEHTUD! Ostetud" in msg: row_class = "msg-buy"
+        elif "Müün" in msg or "STOP HIT" in msg: row_class = "msg-sell"
+        elif "VÕITJA" in msg: row_class = "msg-winner"
+        elif "RISK-FREE" in msg: row_class = "msg-riskfree"
+        elif "UUDIS" in msg: row_class = "msg-news"
+        elif "[SKIP]" in msg: row_class = "msg-skip"
+        elif "Failed" in msg or "Error" in msg or "Traceback" in msg: row_class = "msg-error"
+        elif "LEID:" in msg: row_class = "msg-hot"
+
+        msg = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank">LINK ↗</a>', msg)
         
-        link_html = ""
-        if css == "card-news":
-            raw_content = msg.replace("> UUDIS:", "").strip()
-            if "|||" in raw_content:
-                parts = raw_content.split("|||")
-                title = parts[0].strip()
-                url = parts[1].strip()
-                msg = title
-                link_html = f'<a href="{url}" target="_blank" class="news-btn">Loe edasi ↗</a>'
-            else:
-                msg = raw_content
+        current_cycle.append({"ts": ts, "msg": msg, "class": row_class})
+            
+    if current_cycle:
+        cycles.append(current_cycle)
+        
+    return cycles
 
-        feed_html += f"""
-        <div class="event {css}">
-            <div class="meta">
-                <span class="time">{ts}</span>
-                {f'<span class="badge">{badge}</span>' if badge else ''}
-            </div>
-            <div class="msg">{msg} {link_html}</div>
-        </div>
-        """
-
-    prev_url = f'/?page={page-1}' if page > 1 else '#'
-    next_url = f'/?page={page+1}' if page < total_pages else '#'
-
-    return f"""
+@app.route('/')
+def index():
+    cycles = get_log_content()
+    
+    html = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Vibe Trader</title>
-        <meta http-equiv="refresh" content="30">
+        <title>Vibe Trader 2.1</title>
+        <meta http-equiv="refresh" content="5">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body {{ background: #0f172a; color: #e2e8f0; font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }}
-            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; margin-bottom: 20px; padding-bottom: 10px; }}
-            .event {{ background: #1e293b; border: 1px solid #334155; padding: 12px; border-radius: 8px; margin-bottom: 10px; }}
-            .meta {{ display: flex; gap: 10px; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }}
-            .time {{ color: #38bdf8; min-width: 130px; font-family: monospace; }}
-            .badge {{ font-weight: bold; padding: 2px 6px; border-radius: 4px; }}
-            
-            .card-buy {{ border-left: 4px solid #10b981; }} .card-buy .badge {{ background: #10b981; color: #fff; }}
-            .card-sell {{ border-left: 4px solid #f59e0b; }} .card-sell .badge {{ background: #f59e0b; color: #000; }}
-            .card-news {{ border-left: 4px solid #fff; background: #262f40; }} .card-news .badge {{ background: #475569; color: #fff; }}
-            
-            .news-btn {{ display: inline-block; margin-top: 5px; background: #38bdf8; color: #000; padding: 4px 10px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: bold; }}
-            
-            .card-noise {{ border: none; background: transparent; padding: 4px 0; border-bottom: 1px solid #1e293b; opacity: 0.7; }}
-            .card-noise .time {{ display: none; }} 
-            .card-noise .msg {{ font-size: 13px; color: #64748b; }}
-            
-            .nav {{ margin-top: 20px; text-align: center; }}
-            a {{ color: #38bdf8; text-decoration: none; margin: 0 10px; }}
+            body { 
+                background: #0f172a; 
+                color: #cbd5e1; 
+                font-family: 'Consolas', 'Monaco', monospace; 
+                padding: 20px; 
+                max-width: 1100px; 
+                margin: 0 auto; 
+                font-size: 13px; 
+            }
+            h1 { color: #38bdf8; text-align: center; margin-bottom: 30px; font-family: sans-serif; letter-spacing: 2px; }
+            .cycle-box {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                padding: 10px 0;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+                overflow: hidden;
+            }
+            .row { display: flex; padding: 4px 15px; border-bottom: 1px solid #1e293b; }
+            .row:hover { background: #28364d; }
+            .ts { color: #64748b; min-width: 150px; font-size: 12px; border-right: 1px solid #334155; margin-right: 15px; display: flex; align-items: center; }
+            .msg { word-break: break-word; line-height: 1.5; width: 100%; }
+            a { color: #38bdf8; text-decoration: none; border-bottom: 1px dotted #38bdf8; }
+            .msg-info { color: #cbd5e1; }
+            .msg-buy { color: #10b981; font-weight: bold; background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981; padding-left: 10px; }
+            .msg-sell { color: #f59e0b; font-weight: bold; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; padding-left: 10px; }
+            .msg-winner { color: #a855f7; font-weight: bold; font-size: 1.1em; }
+            .msg-riskfree { color: #60a5fa; }
+            .msg-hot { color: #f472b6; font-weight: bold; }
+            .msg-news { color: #e2e8f0; background: #334155; padding: 5px; border-radius: 4px; display: block; margin: 2px 0; }
+            .msg-skip { color: #475569; font-size: 12px; }
+            .msg-error { color: #ef4444; background: rgba(239, 68, 68, 0.1); padding: 2px 5px; border-radius: 4px; display: block; }
         </style>
     </head>
     <body>
-        <div class="header"><h1>🤖 Vibe Trader</h1><span>LIVE</span></div>
-        {feed_html}
-        <div class="nav"><a href="{prev_url}">❮ Uuemad</a> <span>Leht {page}</span> <a href="{next_url}">Vanemad ❯</a></div>
-    </body>
-    </html>
+        <h1>🤖 VIBE TRADER LIVE</h1>
     """
+    for cycle in cycles:
+        html += '<div class="cycle-box">'
+        for row in cycle:
+            html += f"""<div class="row"><div class="ts">{row['ts']}</div><div class="msg {row['class']}">{row['msg']}</div></div>"""
+        html += '</div>'
+    html += "</body></html>"
+    return html
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host='0.0.0.0', port=8080)
