@@ -36,7 +36,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v16.0 (FRESH BRAINS) ---")
+print("--- VIBE TRADER: v16.1 (STABLE SCANNER) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
@@ -44,7 +44,7 @@ COOL_DOWN_HOURS = 12
 TRAILING_ACTIVATION_ATR = 2.0 
 MIN_VOLUME_USD = 100000    
 MAX_HOURLY_PUMP = 6.0      
-MAX_AI_CALLS = 10          # Analüüsime kuni 10 münti tsüklis
+MAX_AI_CALLS = 10          
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
@@ -116,17 +116,31 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (YAHOO) ---
+# --- 2. ANDMETÖÖTLUS (YAHOO FIX) ---
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
+        # Standard: BTC/USD -> BTC-USD
         y_symbol = symbol.replace("/", "-")
+        
+        # Erijuhtumid (Yahoo võib olla pirtsakas)
+        if "UNI" in symbol: y_symbol = "UNI7083-USD" # Uniswap
+        if "PEPE" in symbol: y_symbol = "PEPE24478-USD" # Pepe
+        
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
+        
+        if df.empty:
+            # Proovime varuvarianti (lihtne sümbol)
+            y_symbol_simple = symbol.split("/")[0] + "-USD"
+            df = yf.download(y_symbol_simple, period=period, interval=interval, progress=False)
+            
         if df.empty: return None
+        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
         if 'close' not in df.columns: return None
+        
         return df.dropna()
     except:
         return None
@@ -226,7 +240,7 @@ def analyze_coin_ai(symbol):
     
     mem = brain.get("ai_memory", {}).get(symbol)
     
-    # --- MÄLU KESTVUS: 2 TUNDI (Värskem info) ---
+    # --- MÄLU KESTVUS: 2 TUNDI ---
     if mem and mem['hash'] == curr_hash and (datetime.now().timestamp() - mem['ts']) < (3600 * 2):
         print(f"      🧠 {symbol} MÄLU: Kasutan vana AI skoori: {mem['score']}")
         return mem['score']
