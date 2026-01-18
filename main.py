@@ -36,12 +36,13 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v16.1 (STABLE SCANNER) ---")
+print("--- VIBE TRADER: v17.0 (RISK-FREE MODE) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
-TRAILING_ACTIVATION_ATR = 2.0 
+TRAILING_ACTIVATION = 4.0  # Kasumi lukustamine (Trailing)
+BREAKEVEN_TRIGGER = 2.5    # UUS: Nulli tõmbamine (Riskivaba)
 MIN_VOLUME_USD = 100000    
 MAX_HOURLY_PUMP = 6.0      
 MAX_AI_CALLS = 10          
@@ -75,7 +76,8 @@ def update_position_metadata(symbol, atr_value):
     if symbol not in brain["positions"]:
         brain["positions"][symbol] = {
             "highest_price": 0, 
-            "atr_at_entry": atr_value 
+            "atr_at_entry": atr_value,
+            "is_risk_free": False # Jälgime, kas oleme juba nullis
         }
     else:
         brain["positions"][symbol]["atr_at_entry"] = atr_value
@@ -87,7 +89,7 @@ def update_high_watermark(symbol, current_price):
     if "positions" not in brain: brain["positions"] = {}
     
     if symbol not in brain["positions"]:
-        brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05}
+        brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05, "is_risk_free": False}
     else:
         if current_price > brain["positions"][symbol]["highest_price"]:
             brain["positions"][symbol]["highest_price"] = current_price
@@ -95,6 +97,12 @@ def update_high_watermark(symbol, current_price):
             return True
     save_brain(brain)
     return False
+
+def set_risk_free_status(symbol):
+    brain = load_brain()
+    if "positions" in brain and symbol in brain["positions"]:
+        brain["positions"][symbol]["is_risk_free"] = True
+        save_brain(brain)
 
 def get_position_data(symbol):
     brain = load_brain()
@@ -116,31 +124,27 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (YAHOO FIX) ---
+# --- 2. ANDMETÖÖTLUS (YAHOO) ---
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
-        # Standard: BTC/USD -> BTC-USD
         y_symbol = symbol.replace("/", "-")
         
-        # Erijuhtumid (Yahoo võib olla pirtsakas)
-        if "UNI" in symbol: y_symbol = "UNI7083-USD" # Uniswap
-        if "PEPE" in symbol: y_symbol = "PEPE24478-USD" # Pepe
+        # FIX: Ticker mapping memecoindele
+        if "PEPE" in symbol: y_symbol = "PEPE-USD" # Vahel aitab see
+        if "UNI" in symbol: y_symbol = "UNI7083-USD"
         
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         
-        if df.empty:
-            # Proovime varuvarianti (lihtne sümbol)
-            y_symbol_simple = symbol.split("/")[0] + "-USD"
-            df = yf.download(y_symbol_simple, period=period, interval=interval, progress=False)
-            
+        # Varuvariant PEPE jaoks
+        if df.empty and "PEPE" in symbol:
+             df = yf.download("PEPE24478-USD", period=period, interval=interval, progress=False)
+
         if df.empty: return None
-        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
         if 'close' not in df.columns: return None
-        
         return df.dropna()
     except:
         return None
@@ -178,7 +182,6 @@ def get_technical_analysis(symbol):
     
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
-    # --- INDIKAATORID ---
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     if pd.isna(rsi): rsi = 50
     
@@ -196,7 +199,6 @@ def get_technical_analysis(symbol):
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close']).iloc[-1]
     if pd.isna(atr): atr = current_price * 0.05
 
-    # --- SKOORIMINE ---
     score = 50
     
     if rsi < 30: score += 25
@@ -239,8 +241,6 @@ def analyze_coin_ai(symbol):
     brain = load_brain()
     
     mem = brain.get("ai_memory", {}).get(symbol)
-    
-    # --- MÄLU KESTVUS: 2 TUNDI ---
     if mem and mem['hash'] == curr_hash and (datetime.now().timestamp() - mem['ts']) < (3600 * 2):
         print(f"      🧠 {symbol} MÄLU: Kasutan vana AI skoori: {mem['score']}")
         return mem['score']
@@ -256,11 +256,7 @@ def analyze_coin_ai(symbol):
     Analüüsi krüptoraha {symbol} 24h potentsiaali.
     Uudised:
     {news_text}
-    Hinda 0-100.
-    85-100: Väga tugev signaal (Partnerlus, Upgrade, Listing).
-    50-84: Positiivne.
-    0-49: Neutraalne/Negatiivne.
-    Vasta AINULT: SKOOR: X
+    Hinda 0-100. Ole kriitiline. Vasta AINULT: SKOOR: X
     """
     try:
         res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
@@ -275,10 +271,10 @@ def analyze_coin_ai(symbol):
     save_brain(brain)
     return score
 
-# --- 4. HALDUS ---
+# --- 4. HALDUS (RISK-FREE MODE) ---
 
 def manage_existing_positions():
-    print("1. PORTFELL: Dünaamiline ATR haldus...")
+    print("1. PORTFELL: Risk-Free & Trailing...")
     try: positions = trading_client.get_all_positions()
     except: return
 
@@ -294,25 +290,45 @@ def manage_existing_positions():
         
         pos_data = get_position_data(symbol)
         hw = pos_data.get("highest_price", 0)
-        if hw == 0: hw = entry_price
-        
         atr = pos_data.get("atr_at_entry", 0)
+        is_risk_free = pos_data.get("is_risk_free", False)
+        
+        if hw == 0: hw = entry_price
         if atr == 0: atr = current_price * 0.05 
         
         if current_price > hw:
             update_high_watermark(symbol, current_price)
             hw = current_price
             
-        stop_price = hw - (2.0 * atr)
-        hard_stop = entry_price * 0.95
-        final_stop = max(stop_price, hard_stop)
+        # --- STOPPIDE LOOGIKA ---
         
+        # 1. Kasumi lukustamine (Trailing Stop) - Aktiveerub hiljem (+4%)
+        trailing_stop = hw - (2.0 * atr)
+        
+        # 2. Riskivaba režiim (Breakeven) - Aktiveerub varem (+2.5%)
+        breakeven_stop = entry_price * 1.005 # 0.5% kasumit katab komisjonid
+        
+        # 3. Kõva stopp (algne kaitse)
+        hard_stop = entry_price * 0.95
+        
+        # OTSUSTAME, MILLIST STOPPI KASUTADA
+        if profit_pct >= TRAILING_ACTIVATION:
+            final_stop = trailing_stop
+            stop_type = "TRAILING 🎢"
+        elif profit_pct >= BREAKEVEN_TRIGGER or is_risk_free:
+            final_stop = max(breakeven_stop, hard_stop)
+            stop_type = "RISK-FREE 🛡️"
+            if not is_risk_free: set_risk_free_status(symbol)
+        else:
+            final_stop = hard_stop
+            stop_type = "HARD 🛑"
+            
         dist_to_stop = ((current_price - final_stop) / current_price) * 100
         
-        print(f"   -> {symbol}: {profit_pct:.2f}% (Hind: ${current_price:.2f} | Stop: ${final_stop:.2f} | Puhver: {dist_to_stop:.2f}%)")
+        print(f"   -> {symbol}: {profit_pct:.2f}% (Stop: ${final_stop:.2f} | {stop_type} | Puhver: {dist_to_stop:.2f}%)")
 
         if current_price <= final_stop:
-            print(f"      !!! ATR STOP HIT! Müün {symbol}...")
+            print(f"      !!! STOP HIT ({stop_type})! Müün {symbol}...")
             close_position(symbol)
 
 def close_position(symbol):
