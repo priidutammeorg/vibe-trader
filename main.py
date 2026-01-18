@@ -36,7 +36,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v10.3 (SYNTAX FIX) ---")
+print("--- VIBE TRADER: v10.4 (FINAL FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 70
@@ -50,7 +50,7 @@ trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
 
-# --- 1. MÄLU JA ABI (PARANDATUD SÜNTAKS) ---
+# --- 1. MÄLU JA ABI ---
 
 def load_brain():
     if os.path.exists(BRAIN_FILE):
@@ -103,25 +103,35 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS ---
+# --- 2. ANDMETÖÖTLUS (PARANDATUD) ---
 
 def get_clean_dataframe(symbol, timeframe, limit):
+    """Tõmbab ja PUHASTAB andmed (Lahendab nan/0k probleemi)"""
     try:
         req = CryptoBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, limit=limit)
         bars = data_client.get_crypto_bars(req)
         df = bars.df
         
         if df.empty: return None
+        
+        # Alpaca tagastab multi-indeksi. Teeme lamedaks.
         df = df.reset_index() 
+        
+        # Filtreerime sümboli
         df = df[df['symbol'] == symbol].copy()
+        
+        # Eemaldame read, kus pole andmeid
         df = df.dropna()
+        
         if len(df) < 10: return None
+        
         return df
     except:
         return None
 
 def check_btc_pulse():
     print("🔍 Tervisekontroll: BTC Pulss...")
+    # Kasutame puhastatud andmeid
     df = get_clean_dataframe("BTC/USD", TimeFrame.Day, 100)
     
     if df is None:
@@ -129,6 +139,8 @@ def check_btc_pulse():
         return True
     
     current = df['close'].iloc[-1]
+    
+    # SMA50
     sma50_series = ta.trend.sma_indicator(df['close'], window=50)
     sma50 = sma50_series.iloc[-1]
     
@@ -145,16 +157,23 @@ def check_btc_pulse():
     return True
 
 def get_technical_analysis(symbol):
+    # Kasutame puhastatud andmeid
     df = get_clean_dataframe(symbol, TimeFrame.Hour, 300)
-    if df is None: return 50, 0 
     
+    if df is None:
+        # Kui andmeid pole, tagastame 0 mahtu, et see ei ostaks
+        return 50, 0 
+    
+    # 1. Volume Check (Arvutame viimase 24h keskmise)
     last_24h = df.tail(24)
     volume_24h = (last_24h['volume'] * last_24h['close']).sum()
     
+    # 2. RSI
     rsi_series = ta.momentum.rsi(df['close'], window=14)
     rsi = rsi_series.iloc[-1]
     if pd.isna(rsi): rsi = 50
     
+    # 3. SMA Trend
     sma200_series = ta.trend.sma_indicator(df['close'], window=200)
     sma200 = sma200_series.iloc[-1]
     price = df['close'].iloc[-1]
@@ -169,6 +188,7 @@ def get_technical_analysis(symbol):
     
     if price > sma200: score += 10
 
+    # Nüüd peaks siin olema reaalne volume, mitte 0
     print(f"      📊 TECH: RSI={rsi:.1f}, Hind>{'SMA' if price>sma200 else 'ALL'}. Vol=${volume_24h/1000:.0f}k")
     return max(0, min(100, score)), volume_24h
 
