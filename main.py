@@ -37,9 +37,9 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v18.7 (YAHOO CHILL MODE) ---")
+print("--- VIBE TRADER: v18.8 (BULLETPROOF) ---")
 
-# STRATEEGIA
+# STRATEEGIA (STABLE)
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
 TRAILING_ACTIVATION = 4.0  
@@ -117,7 +117,7 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (FIXED & SLOWED) ---
+# --- 2. ANDMETÖÖTLUS (BULLETPROOF) ---
 
 def format_symbol_for_yahoo(symbol):
     s = symbol.replace("/", "")
@@ -131,13 +131,14 @@ def format_symbol_for_yahoo(symbol):
     return s + "-USD"
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
+    # See funktsioon on nüüd vaikne. Kui viga tekib, tagastab None ja ei karju.
     try:
         y_symbol = format_symbol_for_yahoo(symbol)
         
-        # FIX: Püüame kinni tühjad vastused ja vead
+        # Püüame kõik vead kinni, et logi ei reostuks
         try:
-            df = yf.download(y_symbol, period=period, interval=interval, progress=False, threads=False)
-        except Exception:
+            df = yf.download(y_symbol, period=period, interval=interval, progress=False)
+        except:
             return None
         
         if df is None or df.empty: return None
@@ -262,25 +263,22 @@ def manage_existing_positions():
 
     for p in positions:
         symbol = p.symbol
-        
-        # --- PAUS SIIN ON KRIITILINE ---
-        # Ootame 2 sekundit iga mündi vahel, et Yahoo meid ei blokeeriks
-        time.sleep(2.0)
+        time.sleep(2.0) # Paus Yahoo jaoks
         
         entry_price = float(p.avg_entry_price)
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
-        # Küsime andmeid ettevaatlikult
-        df = get_yahoo_data(symbol, period="5d", interval="1h")
-        
+        # --- TUGEV VEAKONTROLL ---
+        # Kui Yahoo ei vasta, kasutame vaikeväärtust (50), mitte ei krahhi
         current_rsi = 50
-        if df is not None:
-             current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
-             if pd.isna(current_rsi): current_rsi = 50
-        else:
-             # Kui andmed puuduvad, kasutame vaikimisi väärtust, mitte ei krahhi
-             pass 
+        try:
+            df = get_yahoo_data(symbol, period="5d", interval="1h")
+            if df is not None:
+                 current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
+                 if pd.isna(current_rsi): current_rsi = 50
+        except:
+            pass # Kui midagi läheb valesti, on RSI 50 ja elu läheb edasi
 
         pos_data = get_position_data(symbol)
         hw = pos_data.get("highest_price", 0)
