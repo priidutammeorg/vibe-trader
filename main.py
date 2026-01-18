@@ -36,14 +36,14 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v18.1 (TRANSPARENT & PROFIT LOCK) ---")
+print("--- VIBE TRADER: v18.2 (SYMBOL & VOLUME PATCH) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
 TRAILING_ACTIVATION = 4.0  
 BREAKEVEN_TRIGGER = 2.5    
-MIN_VOLUME_USD = 50000     # Langetasime veidi piiri (50k), et näha rohkem
+MIN_VOLUME_USD = 1000      # LANGETATUD: Paper Tradingus on maht vahel väike
 MAX_HOURLY_PUMP = 6.0      
 MAX_AI_CALLS = 10          
 
@@ -73,7 +73,6 @@ def update_position_metadata(symbol, atr_value):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
-    # Salvestame algse ATR-i
     if symbol not in brain["positions"]:
         brain["positions"][symbol] = {
             "highest_price": 0, 
@@ -81,7 +80,6 @@ def update_position_metadata(symbol, atr_value):
             "is_risk_free": False 
         }
     else:
-        # Uuendame ainult kui puudu, et mitte kaotada algset volatiilsust
         if "atr_at_entry" not in brain["positions"][symbol]:
             brain["positions"][symbol]["atr_at_entry"] = atr_value
         
@@ -96,10 +94,10 @@ def update_high_watermark(symbol, current_price, current_rsi=50):
             "highest_price": current_price, 
             "atr_at_entry": current_price * 0.05, 
             "is_risk_free": False,
-            "last_rsi": current_rsi # Salvestame RSI
+            "last_rsi": current_rsi
         }
     else:
-        brain["positions"][symbol]["last_rsi"] = current_rsi # Uuendame RSI-d
+        brain["positions"][symbol]["last_rsi"] = current_rsi
         if current_price > brain["positions"][symbol]["highest_price"]:
             brain["positions"][symbol]["highest_price"] = current_price
             save_brain(brain)
@@ -133,19 +131,29 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS ---
+# --- 2. ANDMETÖÖTLUS (FIXED SYMBOLS) ---
+
+def format_symbol_for_yahoo(symbol):
+    """Teeb Alpaca sümbolist Yahoo sümboli"""
+    # 1. Eemalda kaldkriips
+    s = symbol.replace("/", "")
+    
+    # 2. Erijuhtumid
+    if "PEPE" in s: return "PEPE24478-USD"
+    if "UNI" in s and "UNIVERSE" not in s: return "UNI7083-USD"
+    
+    # 3. Kui lõpeb USD-ga, pane kriips vahele (nt BTCUSD -> BTC-USD)
+    if s.endswith("USD"):
+        return s[:-3] + "-USD"
+        
+    return s + "-USD"
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
-        y_symbol = symbol.replace("/", "-")
-        if "PEPE" in symbol: y_symbol = "PEPE-USD"
-        if "UNI" in symbol: y_symbol = "UNI7083-USD"
+        y_symbol = format_symbol_for_yahoo(symbol)
         
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         
-        if df.empty and "PEPE" in symbol:
-             df = yf.download("PEPE24478-USD", period=period, interval=interval, progress=False)
-
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -180,7 +188,7 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
     
     if df is None or len(df) < 30:
-        return 50, 0, 0, 0 # Tagastame ka RSI
+        return 50, 0, 0, 0 
     
     current_price = df['close'].iloc[-1]
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
@@ -202,7 +210,6 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close']).iloc[-1]
     if pd.isna(atr): atr = current_price * 0.05
 
-    # --- SKOORIMINE ---
     score = 50
     if rsi < 30: score += 25
     elif rsi < 45: score += 10
@@ -291,7 +298,7 @@ def manage_existing_positions():
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
-        # Hangime tehnilised andmed RSI jaoks
+        # Yahoo andmete hankimine (nüüd parandatud sümboliga)
         df = get_yahoo_data(symbol, period="5d", interval="1h")
         current_rsi = 50
         if df is not None:
@@ -310,19 +317,14 @@ def manage_existing_positions():
             update_high_watermark(symbol, current_price, current_rsi)
             hw = current_price
             
-        # --- UUS: DÜNAAMILINE STOP (Profit Lock) ---
-        # Kui RSI > 75 (üleostetud), tõmbame stopi kitsamaks (1x ATR)
         atr_multiplier = 1.0 if current_rsi > 75 else 2.0
         trailing_stop = hw - (atr_multiplier * atr)
-        
         breakeven_stop = entry_price * 1.005
         hard_stop = entry_price * 0.95
         
         if profit_pct >= TRAILING_ACTIVATION:
             final_stop = trailing_stop
-            # Lisame märgi, kui on kitsas stop
             stop_type = "TRAILING 🔥" if atr_multiplier == 1.0 else "TRAILING 🎢"
-            
         elif profit_pct >= BREAKEVEN_TRIGGER or is_risk_free:
             final_stop = max(breakeven_stop, hard_stop)
             stop_type = "RISK-FREE 🛡️"
@@ -413,7 +415,6 @@ def run_cycle():
         clean = s.replace("/", "")
         alpaca_vol = c['vol_usd']
         
-        # --- LÄBIPAISTEV LOGI (Kus midagi vahele jäetakse) ---
         if clean in my_pos:
             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Juba olemas.")
             continue
@@ -422,8 +423,9 @@ def run_cycle():
             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Jahutusel.")
             continue
 
+        # LANGETATUD PIIR: 1000 USD (Paper trading on vahel loll)
         if alpaca_vol < MIN_VOLUME_USD: 
-             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Maht liiga väike (${alpaca_vol/1000:.0f}k).")
+             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Maht liiga väike (${alpaca_vol/1000:.1f}k).")
              continue
              
         time.sleep(0.5) 
