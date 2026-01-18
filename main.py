@@ -36,7 +36,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v15.2 (HIGH BANDWIDTH) ---")
+print("--- VIBE TRADER: v16.0 (FRESH BRAINS) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
@@ -44,7 +44,7 @@ COOL_DOWN_HOURS = 12
 TRAILING_ACTIVATION_ATR = 2.0 
 MIN_VOLUME_USD = 100000    
 MAX_HOURLY_PUMP = 6.0      
-MAX_AI_CALLS = 10          # TÕSTETUD! Nüüd analüüsime 10 münti tsükli kohta.
+MAX_AI_CALLS = 10          # Analüüsime kuni 10 münti tsüklis
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
@@ -225,7 +225,9 @@ def analyze_coin_ai(symbol):
     brain = load_brain()
     
     mem = brain.get("ai_memory", {}).get(symbol)
-    if mem and mem['hash'] == curr_hash and (datetime.now().timestamp() - mem['ts']) < (3600 * 6):
+    
+    # --- MÄLU KESTVUS: 2 TUNDI (Värskem info) ---
+    if mem and mem['hash'] == curr_hash and (datetime.now().timestamp() - mem['ts']) < (3600 * 2):
         print(f"      🧠 {symbol} MÄLU: Kasutan vana AI skoori: {mem['score']}")
         return mem['score']
 
