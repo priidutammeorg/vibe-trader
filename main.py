@@ -38,14 +38,14 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v18.3 (UI & GRT FIX) ---")
+print("--- VIBE TRADER: v18.4 (SYNTAX FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
 TRAILING_ACTIVATION = 4.0  
 BREAKEVEN_TRIGGER = 2.5    
-MIN_VOLUME_USD = 1000      # Madal piir, et Paper Trading toimiks
+MIN_VOLUME_USD = 1000      
 MAX_HOURLY_PUMP = 6.0      
 MAX_AI_CALLS = 10          
 
@@ -63,8 +63,12 @@ def load_brain():
     return {}
 
 def save_brain(brain_data):
-    try: with open(BRAIN_FILE, 'w') as f: json.dump(brain_data, f, indent=4)
-    except: pass
+    # PARANDATUD SÜNTAKS: Read peavad olema eraldi
+    try: 
+        with open(BRAIN_FILE, 'w') as f: 
+            json.dump(brain_data, f, indent=4)
+    except: 
+        pass
 
 def update_position_metadata(symbol, atr_value):
     brain = load_brain()
@@ -116,14 +120,13 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (PARANDATUD SÜMBOLID) ---
+# --- 2. ANDMETÖÖTLUS ---
 
 def format_symbol_for_yahoo(symbol):
     s = symbol.replace("/", "")
-    # Ticker mapping
     if "PEPE" in s: return "PEPE24478-USD"
     if "UNI" in s and "UNIVERSE" not in s: return "UNI7083-USD"
-    if "GRT" in s: return "GRT6719-USD" # The Graph fix
+    if "GRT" in s: return "GRT6719-USD"
     if "SHIB" in s: return "SHIB-USD"
     if "WIF" in s: return "WIF-USD"
     if "BONK" in s: return "BONK-USD"
@@ -134,7 +137,6 @@ def format_symbol_for_yahoo(symbol):
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
         y_symbol = format_symbol_for_yahoo(symbol)
-        # Suppress output fix
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         
         if df.empty: return None
