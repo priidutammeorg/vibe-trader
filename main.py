@@ -8,14 +8,14 @@ import json
 import hashlib
 import pandas as pd
 import ta
+import yfinance as yf  # <--- Nüüd peamine andmeallikas
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest, MarketOrderRequest
 from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data.requests import CryptoSnapshotRequest, CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 
 # --- 0. SEADISTUS ---
@@ -36,10 +36,10 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v10.4 (FINAL FIX) ---")
+print("--- VIBE TRADER: v11.0 (HYBRID ENGINE) ---")
 
 # STRATEEGIA
-MIN_FINAL_SCORE = 70
+MIN_FINAL_SCORE = 75
 COOL_DOWN_HOURS = 12
 HARD_STOP_LOSS_PCT = -5.0
 TRAILING_ACTIVATION = 5.0
@@ -47,7 +47,7 @@ TRAILING_DISTANCE = 2.0
 MIN_VOLUME_USD = 100000 
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
-data_client = CryptoHistoricalDataClient()
+data_client = CryptoHistoricalDataClient() # Jääb alles ainult snapshotide jaoks
 ai_client = OpenAI(api_key=openai_key)
 
 # --- 1. MÄLU JA ABI ---
@@ -103,46 +103,48 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (PARANDATUD) ---
+# --- 2. ANDMETÖÖTLUS (YAHOO FINANCE POWERED) ---
 
-def get_clean_dataframe(symbol, timeframe, limit):
-    """Tõmbab ja PUHASTAB andmed (Lahendab nan/0k probleemi)"""
+def get_yahoo_data(symbol, period="5d", interval="1h"):
+    """Tõmbab andmed Yahoo Finance'ist (Tasuta ja töökindel)"""
     try:
-        req = CryptoBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, limit=limit)
-        bars = data_client.get_crypto_bars(req)
-        df = bars.df
+        # Alpaca: BTC/USD -> Yahoo: BTC-USD
+        y_symbol = symbol.replace("/", "-")
+        
+        # Tõmbame andmed
+        df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         
         if df.empty: return None
         
-        # Alpaca tagastab multi-indeksi. Teeme lamedaks.
-        df = df.reset_index() 
+        # Yahoo tagastab vahel MultiIndexi, teeme lamedaks
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        # Teeme veerunimed väikeseks, et koodil oleks lihtsam (Close -> close)
+        df.columns = [c.lower() for c in df.columns]
         
-        # Filtreerime sümboli
-        df = df[df['symbol'] == symbol].copy()
+        # Kontrollime, kas 'close' veerg on olemas
+        if 'close' not in df.columns: return None
         
-        # Eemaldame read, kus pole andmeid
+        # Puhastame
         df = df.dropna()
-        
-        if len(df) < 10: return None
-        
         return df
-    except:
+    except Exception as e:
         return None
 
 def check_btc_pulse():
-    print("🔍 Tervisekontroll: BTC Pulss...")
-    # Kasutame puhastatud andmeid
-    df = get_clean_dataframe("BTC/USD", TimeFrame.Day, 100)
+    print("🔍 Tervisekontroll: BTC Pulss (Yahoo)...")
+    # Võtame 6 kuud päevast graafikut
+    df = get_yahoo_data("BTC/USD", period="6mo", interval="1d")
     
-    if df is None:
+    if df is None or len(df) < 50:
         print("   ⚠️ BTC andmed puuduvad. Jätkan ettevaatlikult.")
         return True
     
     current = df['close'].iloc[-1]
     
     # SMA50
-    sma50_series = ta.trend.sma_indicator(df['close'], window=50)
-    sma50 = sma50_series.iloc[-1]
+    sma50 = ta.trend.sma_indicator(df['close'], window=50).iloc[-1]
     
     if pd.isna(sma50): sma50 = current
 
@@ -151,29 +153,28 @@ def check_btc_pulse():
     
     print(f"   BTC: ${current:.0f} | SMA50: ${sma50:.0f} | 24h: {change:.2f}%")
     
-    if current < (sma50 * 0.96) or change < -4.5:
+    if current < (sma50 * 0.95) or change < -5.0:
         print("   ⛔ TURG ON OHTLIK. Ootan.")
         return False
     return True
 
 def get_technical_analysis(symbol):
-    # Kasutame puhastatud andmeid
-    df = get_clean_dataframe(symbol, TimeFrame.Hour, 300)
+    # Võtame 1 kuu tunnipõhist graafikut
+    df = get_yahoo_data(symbol, period="1mo", interval="1h")
     
-    if df is None:
-        # Kui andmeid pole, tagastame 0 mahtu, et see ei ostaks
-        return 50, 0 
+    if df is None or len(df) < 20:
+        return 50, 0 # Andmed puuduvad
     
-    # 1. Volume Check (Arvutame viimase 24h keskmise)
+    # 1. Volume Check (Viimase 24h maht rahas)
+    # Yahoo maht on ühikutes, korrutame hinnaga
     last_24h = df.tail(24)
     volume_24h = (last_24h['volume'] * last_24h['close']).sum()
     
     # 2. RSI
-    rsi_series = ta.momentum.rsi(df['close'], window=14)
-    rsi = rsi_series.iloc[-1]
+    rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     if pd.isna(rsi): rsi = 50
     
-    # 3. SMA Trend
+    # 3. SMA Trend (200 tunni keskmine)
     sma200_series = ta.trend.sma_indicator(df['close'], window=200)
     sma200 = sma200_series.iloc[-1]
     price = df['close'].iloc[-1]
@@ -188,7 +189,6 @@ def get_technical_analysis(symbol):
     
     if price > sma200: score += 10
 
-    # Nüüd peaks siin olema reaalne volume, mitte 0
     print(f"      📊 TECH: RSI={rsi:.1f}, Hind>{'SMA' if price>sma200 else 'ALL'}. Vol=${volume_24h/1000:.0f}k")
     return max(0, min(100, score)), volume_24h
 
@@ -308,6 +308,7 @@ def run_cycle():
     
     print("2. SKANNER: Otsin turu liikujaid...")
     try:
+        # Kasutame Alpaca ainult nimekirja saamiseks, mitte andmeteks
         assets = trading_client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE))
         ignore = ["USDT/USD", "USDC/USD", "DAI/USD", "WBTC/USD"]
         tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore]
