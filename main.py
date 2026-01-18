@@ -36,14 +36,14 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v18.0 (HYBRID DATA CORE) ---")
+print("--- VIBE TRADER: v18.1 (TRANSPARENT & PROFIT LOCK) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
 COOL_DOWN_HOURS = 12       
 TRAILING_ACTIVATION = 4.0  
-BREAKEVEN_TRIGGER = 2.5    # Riskivaba režiim
-MIN_VOLUME_USD = 100000    
+BREAKEVEN_TRIGGER = 2.5    
+MIN_VOLUME_USD = 50000     # Langetasime veidi piiri (50k), et näha rohkem
 MAX_HOURLY_PUMP = 6.0      
 MAX_AI_CALLS = 10          
 
@@ -73,6 +73,7 @@ def update_position_metadata(symbol, atr_value):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
+    # Salvestame algse ATR-i
     if symbol not in brain["positions"]:
         brain["positions"][symbol] = {
             "highest_price": 0, 
@@ -80,17 +81,25 @@ def update_position_metadata(symbol, atr_value):
             "is_risk_free": False 
         }
     else:
-        brain["positions"][symbol]["atr_at_entry"] = atr_value
+        # Uuendame ainult kui puudu, et mitte kaotada algset volatiilsust
+        if "atr_at_entry" not in brain["positions"][symbol]:
+            brain["positions"][symbol]["atr_at_entry"] = atr_value
         
     save_brain(brain)
 
-def update_high_watermark(symbol, current_price):
+def update_high_watermark(symbol, current_price, current_rsi=50):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     
     if symbol not in brain["positions"]:
-        brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05, "is_risk_free": False}
+        brain["positions"][symbol] = {
+            "highest_price": current_price, 
+            "atr_at_entry": current_price * 0.05, 
+            "is_risk_free": False,
+            "last_rsi": current_rsi # Salvestame RSI
+        }
     else:
+        brain["positions"][symbol]["last_rsi"] = current_rsi # Uuendame RSI-d
         if current_price > brain["positions"][symbol]["highest_price"]:
             brain["positions"][symbol]["highest_price"] = current_price
             save_brain(brain)
@@ -124,18 +133,16 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (YAHOO TECH + ALPACA VOLUME) ---
+# --- 2. ANDMETÖÖTLUS ---
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
         y_symbol = symbol.replace("/", "-")
-        
         if "PEPE" in symbol: y_symbol = "PEPE-USD"
         if "UNI" in symbol: y_symbol = "UNI7083-USD"
         
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         
-        # Fallback PEPE
         if df.empty and "PEPE" in symbol:
              df = yf.download("PEPE24478-USD", period=period, interval=interval, progress=False)
 
@@ -173,12 +180,11 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
     
     if df is None or len(df) < 30:
-        return 50, 0, 0 
+        return 50, 0, 0, 0 # Tagastame ka RSI
     
     current_price = df['close'].iloc[-1]
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
-    # --- INDIKAATORID ---
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     if pd.isna(rsi): rsi = 50
     
@@ -198,7 +204,6 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
 
     # --- SKOORIMINE ---
     score = 50
-    
     if rsi < 30: score += 25
     elif rsi < 45: score += 10
     elif rsi > 70: score -= 30
@@ -216,10 +221,9 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
 
     if score >= 45:
         macd_str = "POS" if macd_diff > 0 else "NEG"
-        # Logime nüüd Alpaca mahu, mis on täpne
         print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, ADX={adx:.1f}. Vol=${alpaca_volume_usd/1000:.0f}k. Skoor: {score}")
     
-    return max(0, min(100, score)), hourly_change, atr
+    return max(0, min(100, score)), hourly_change, atr, rsi
 
 # --- 3. AI & UUDISED ---
 
@@ -273,7 +277,7 @@ def analyze_coin_ai(symbol):
 # --- 4. HALDUS ---
 
 def manage_existing_positions():
-    print("1. PORTFELL: Risk-Free & Trailing...")
+    print("1. PORTFELL: Risk-Free & Profit Lock...")
     try: positions = trading_client.get_all_positions()
     except: return
 
@@ -287,6 +291,13 @@ def manage_existing_positions():
         current_price = float(p.current_price)
         profit_pct = float(p.unrealized_plpc) * 100
         
+        # Hangime tehnilised andmed RSI jaoks
+        df = get_yahoo_data(symbol, period="5d", interval="1h")
+        current_rsi = 50
+        if df is not None:
+             current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
+             if pd.isna(current_rsi): current_rsi = 50
+
         pos_data = get_position_data(symbol)
         hw = pos_data.get("highest_price", 0)
         atr = pos_data.get("atr_at_entry", 0)
@@ -296,16 +307,22 @@ def manage_existing_positions():
         if atr == 0: atr = current_price * 0.05 
         
         if current_price > hw:
-            update_high_watermark(symbol, current_price)
+            update_high_watermark(symbol, current_price, current_rsi)
             hw = current_price
             
-        trailing_stop = hw - (2.0 * atr)
+        # --- UUS: DÜNAAMILINE STOP (Profit Lock) ---
+        # Kui RSI > 75 (üleostetud), tõmbame stopi kitsamaks (1x ATR)
+        atr_multiplier = 1.0 if current_rsi > 75 else 2.0
+        trailing_stop = hw - (atr_multiplier * atr)
+        
         breakeven_stop = entry_price * 1.005
         hard_stop = entry_price * 0.95
         
         if profit_pct >= TRAILING_ACTIVATION:
             final_stop = trailing_stop
-            stop_type = "TRAILING 🎢"
+            # Lisame märgi, kui on kitsas stop
+            stop_type = "TRAILING 🔥" if atr_multiplier == 1.0 else "TRAILING 🎢"
+            
         elif profit_pct >= BREAKEVEN_TRIGGER or is_risk_free:
             final_stop = max(breakeven_stop, hard_stop)
             stop_type = "RISK-FREE 🛡️"
@@ -316,7 +333,7 @@ def manage_existing_positions():
             
         dist_to_stop = ((current_price - final_stop) / current_price) * 100
         
-        print(f"   -> {symbol}: {profit_pct:.2f}% (Stop: ${final_stop:.2f} | {stop_type} | Puhver: {dist_to_stop:.2f}%)")
+        print(f"   -> {symbol}: {profit_pct:.2f}% (RSI:{current_rsi:.0f} | Stop: ${final_stop:.2f} | {stop_type} | Puhver: {dist_to_stop:.2f}%)")
 
         if current_price <= final_stop:
             print(f"      !!! STOP HIT ({stop_type})! Müün {symbol}...")
@@ -368,20 +385,16 @@ def run_cycle():
     except: return
 
     candidates = []
-    # --- UUS: Filtreerime mahu järgi JUBA SIIN, kasutades Alpaca andmeid ---
     for s, snap in snapshots.items():
         if not snap.daily_bar or snap.daily_bar.open == 0: continue
         
-        # Arvutame mahu USD-s (Maht * Hind)
         vol_usd = snap.daily_bar.volume * snap.daily_bar.close
-        
-        # Salvestame kandidaadi koos mahuga
         chg = ((snap.daily_bar.close - snap.daily_bar.open) / snap.daily_bar.open) * 100
         candidates.append({
             "symbol": s, 
             "change": chg, 
             "abs_change": abs(chg),
-            "vol_usd": vol_usd # Salvestame mahu siia
+            "vol_usd": vol_usd
         })
         
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
@@ -393,29 +406,39 @@ def run_cycle():
     ai_calls_made = 0
     
     total_coins = len(candidates)
-    print(f"   -> Leidsin {total_coins} münti. Alustan hübriid-analüüsi...")
+    print(f"   -> Leidsin {total_coins} münti. Alustan analüüsi (Top 10 AI)...")
 
     for i, c in enumerate(candidates):
         s = c['symbol']
         clean = s.replace("/", "")
-        alpaca_vol = c['vol_usd'] # Kasutame Alpaca mahtu
+        alpaca_vol = c['vol_usd']
         
-        if clean in my_pos or not is_cooled_down(s): continue
+        # --- LÄBIPAISTEV LOGI (Kus midagi vahele jäetakse) ---
+        if clean in my_pos:
+            print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Juba olemas.")
+            continue
+            
+        if not is_cooled_down(s):
+            print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Jahutusel.")
+            continue
 
-        # --- FILTRID (Enne Yahoo päringut) ---
         if alpaca_vol < MIN_VOLUME_USD: 
-             # Jätame vahele, ei hakka Yahoost küsimagi
+             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Maht liiga väike (${alpaca_vol/1000:.0f}k).")
              continue
              
         time.sleep(0.5) 
         
         print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
 
-        # Anname Yahoo funktsioonile Alpaca mahu kaasa
-        tech_score, hourly_chg, atr = get_technical_analysis(s, alpaca_vol)
+        tech_score, hourly_chg, atr, rsi = get_technical_analysis(s, alpaca_vol)
         
-        if hourly_chg > MAX_HOURLY_PUMP: continue
-        if tech_score < 45: continue 
+        if hourly_chg > MAX_HOURLY_PUMP: 
+             print(f"      ⛔ FOMO: Liiga suur pump ({hourly_chg:.1f}%).")
+             continue
+             
+        if tech_score < 45: 
+             print(f"      ❌ Nõrk tehnika ({tech_score}).")
+             continue
 
         if ai_calls_made >= MAX_AI_CALLS:
             print("   ⚠️ AI limiit täis.")
