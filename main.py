@@ -36,7 +36,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v14.0 (TOTAL MARKET DOMINATION) ---")
+print("--- VIBE TRADER: v14.1 (ROUNDING FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
@@ -46,7 +46,7 @@ TRAILING_ACTIVATION = 4.0
 TRAILING_DISTANCE = 1.5    
 MIN_VOLUME_USD = 100000    
 MAX_HOURLY_PUMP = 5.0
-MAX_AI_CALLS = 5           # Kaitseme rahakotti: Max 5 AI analüüsi tsükli kohta
+MAX_AI_CALLS = 5           
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
@@ -109,7 +109,6 @@ def activate_cooldown(symbol):
 def get_yahoo_data(symbol, period="5d", interval="1h"):
     try:
         y_symbol = symbol.replace("/", "-")
-        # progress=False hoiab logi puhtana
         df = yf.download(y_symbol, period=period, interval=interval, progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -175,7 +174,6 @@ def get_technical_analysis(symbol):
     
     if current_price > sma200: score += 10
 
-    # Prindime logisse ainult siis, kui on huvitav, et logi ei upuks
     if score >= 45:
         macd_str = "POS" if macd_diff > 0 else "NEG"
         print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, 1h={hourly_change:.2f}%. Vol=${volume_24h/1000:.0f}k. Skoor: {score}")
@@ -288,6 +286,9 @@ def trade(symbol, score):
     amount = equity * size_pct
     amount = max(amount, 10)
     
+    # --- FIX: Ümardamine 2 kohani, et Alpaca ei nutaks ---
+    amount = round(amount, 2)
+    
     print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} eest (Skoor {score} -> {size_pct*100}%).")
     try:
         req = MarketOrderRequest(symbol=symbol, notional=amount, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
@@ -306,7 +307,6 @@ def run_cycle():
         assets = trading_client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE))
         ignore = ["USDT/USD", "USDC/USD", "DAI/USD", "WBTC/USD"]
         tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore]
-        # Võtame snapshotid kõigile (kiire Alpaca päring)
         snapshots = data_client.get_crypto_snapshot(CryptoSnapshotRequest(symbol_or_symbols=tradable))
     except: return
 
@@ -316,7 +316,6 @@ def run_cycle():
         chg = ((snap.daily_bar.close - snap.daily_bar.open) / snap.daily_bar.open) * 100
         candidates.append({"symbol": s, "change": chg, "abs_change": abs(chg)})
     
-    # Sorteerime volatiilsuse järgi (et alustada kõige huvitavamatest)
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     
     my_pos = [p.symbol.replace("/", "").replace("-", "") for p in trading_client.get_all_positions()]
@@ -327,27 +326,22 @@ def run_cycle():
     total_coins = len(candidates)
     print(f"   -> Leidsin {total_coins} münti. Alustan täppis-skaneerimist (Yahoo)...")
 
-    # KÄIME LÄBI KÕIK (või kuni AI limiit täis)
     for i, c in enumerate(candidates):
         s = c['symbol']
         clean = s.replace("/", "")
         
         if clean in my_pos or not is_cooled_down(s): continue
 
-        # Väike paus, et mitte Yahoo serverit kurjaks ajada
         time.sleep(0.5)
         
         print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
 
-        # 1. KIIRE TEHNILINE KONTROLL (Yahoo - Tasuta)
         tech_score, volume, hourly_chg = get_technical_analysis(s)
         
-        # Filtrid (Välistame rämpsu kohe)
         if volume < MIN_VOLUME_USD: continue 
         if hourly_chg > MAX_HOURLY_PUMP: continue
-        if tech_score < 45: continue # Kui tehniliselt nõrk, siis prügikasti
+        if tech_score < 45: continue 
 
-        # 2. AI ANALÜÜS (Ainult parimatele)
         if ai_calls_made >= MAX_AI_CALLS:
             print("   ⚠️ AI limiit täis. Lõpetan otsingu parima leitud kandidaadiga.")
             break
