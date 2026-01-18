@@ -36,7 +36,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v10.2 (DATA FIX) ---")
+print("--- VIBE TRADER: v10.3 (SYNTAX FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 70
@@ -44,23 +44,29 @@ COOL_DOWN_HOURS = 12
 HARD_STOP_LOSS_PCT = -5.0
 TRAILING_ACTIVATION = 5.0
 TRAILING_DISTANCE = 2.0
-MIN_VOLUME_USD = 100000 # Alandasime veidi piiri, et välistada ainult täielik rämps
+MIN_VOLUME_USD = 100000 
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
 ai_client = OpenAI(api_key=openai_key)
 
-# --- 1. MÄLU JA ABI ---
+# --- 1. MÄLU JA ABI (PARANDATUD SÜNTAKS) ---
 
 def load_brain():
     if os.path.exists(BRAIN_FILE):
-        try: with open(BRAIN_FILE, 'r') as f: return json.load(f)
-        except: return {}
+        try:
+            with open(BRAIN_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
 def save_brain(brain_data):
-    try: with open(BRAIN_FILE, 'w') as f: json.dump(brain_data, f, indent=4)
-    except: pass
+    try:
+        with open(BRAIN_FILE, 'w') as f:
+            json.dump(brain_data, f, indent=4)
+    except:
+        pass
 
 def update_high_watermark(symbol, current_price):
     brain = load_brain()
@@ -97,32 +103,21 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS (FIXED) ---
+# --- 2. ANDMETÖÖTLUS ---
 
 def get_clean_dataframe(symbol, timeframe, limit):
-    """Tõmbab ja PUHASTAB andmed"""
     try:
         req = CryptoBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, limit=limit)
         bars = data_client.get_crypto_bars(req)
         df = bars.df
         
         if df.empty: return None
-        
-        # Alpaca tagastab multi-indeksi (symbol, timestamp). Teeme selle lihtsaks.
         df = df.reset_index() 
-        
-        # Filtreerime ainult konkreetse sümboli andmed (igaks juhuks)
         df = df[df['symbol'] == symbol].copy()
-        
-        # Eemaldame tühjad read
         df = df.dropna()
-        
-        # Kontrollime, kas andmeid jäi alles
         if len(df) < 10: return None
-        
         return df
-    except Exception as e:
-        # print(f"      Viga andmete laadimisel {symbol}: {e}") # Debugging
+    except:
         return None
 
 def check_btc_pulse():
@@ -134,12 +129,9 @@ def check_btc_pulse():
         return True
     
     current = df['close'].iloc[-1]
-    
-    # SMA50
     sma50_series = ta.trend.sma_indicator(df['close'], window=50)
     sma50 = sma50_series.iloc[-1]
     
-    # Kui SMA on nan (alguses), kasutame hinda ennast
     if pd.isna(sma50): sma50 = current
 
     open_price = df['open'].iloc[-1]
@@ -154,26 +146,20 @@ def check_btc_pulse():
 
 def get_technical_analysis(symbol):
     df = get_clean_dataframe(symbol, TimeFrame.Hour, 300)
+    if df is None: return 50, 0 
     
-    if df is None:
-        return 50, 0 # Andmed katki, neutraalne
-    
-    # 1. Volume Check (Viimase 24h keskmine)
-    # Võtame viimased 24 rida
     last_24h = df.tail(24)
     volume_24h = (last_24h['volume'] * last_24h['close']).sum()
     
-    # 2. RSI
     rsi_series = ta.momentum.rsi(df['close'], window=14)
     rsi = rsi_series.iloc[-1]
     if pd.isna(rsi): rsi = 50
     
-    # 3. SMA Trend
     sma200_series = ta.trend.sma_indicator(df['close'], window=200)
     sma200 = sma200_series.iloc[-1]
     price = df['close'].iloc[-1]
     
-    if pd.isna(sma200): sma200 = price # Fallback
+    if pd.isna(sma200): sma200 = price
 
     score = 50
     if rsi < 30: score += 40
