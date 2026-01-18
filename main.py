@@ -22,7 +22,6 @@ from openai import OpenAI
 LOG_FILE = "bot.log"
 BRAIN_FILE = "brain.json"
 
-# Kohandatud printimine timestampiga
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     kwargs['flush'] = True
@@ -38,7 +37,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v18.4 (SYNTAX FIX) ---")
+print("--- VIBE TRADER: v18.5 (VOLUME FALLBACK FIX) ---")
 
 # STRATEEGIA
 MIN_FINAL_SCORE = 75       
@@ -63,12 +62,10 @@ def load_brain():
     return {}
 
 def save_brain(brain_data):
-    # PARANDATUD SÜNTAKS: Read peavad olema eraldi
     try: 
         with open(BRAIN_FILE, 'w') as f: 
             json.dump(brain_data, f, indent=4)
-    except: 
-        pass
+    except: pass
 
 def update_position_metadata(symbol, atr_value):
     brain = load_brain()
@@ -162,9 +159,20 @@ def check_btc_pulse():
 
 def get_technical_analysis(symbol, alpaca_volume_usd):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
-    if df is None or len(df) < 30: return 50, 0, 0, 0
+    # Kui Yahoo andmeid pole, ei saa midagi teha
+    if df is None or len(df) < 30: return 50, 0, 0, 0, 0
     
     current_price = df['close'].iloc[-1]
+    
+    # --- UUS: Yahoo Volume Check ---
+    # Kui Alpaca andis 0, võtame Yahoo mahu
+    yahoo_vol_usd = 0
+    if 'volume' in df.columns:
+        yahoo_vol_usd = df['volume'].iloc[-1] * current_price
+    
+    # Kasutame suuremat kahest (Alpaca vs Yahoo)
+    final_vol_usd = max(alpaca_volume_usd, yahoo_vol_usd)
+
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
     
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
@@ -191,11 +199,11 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     if current_price <= (bb_low * 1.01): score += 15
     elif current_price >= (bb_high * 0.99): score -= 15
 
-    if score >= 45:
+    if score >= 45 and final_vol_usd >= MIN_VOLUME_USD:
         macd_str = "POS" if macd_diff > 0 else "NEG"
-        print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, ADX={adx:.1f}. Vol=${alpaca_volume_usd/1000:.0f}k. Skoor: {score}")
+        print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, ADX={adx:.1f}. Vol=${final_vol_usd/1000:.0f}k. Skoor: {score}")
     
-    return max(0, min(100, score)), hourly_change, atr, rsi
+    return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
 # --- 3. AI & UUDISED ---
 
@@ -368,14 +376,25 @@ def run_cycle():
         if not is_cooled_down(s):
             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Jahutusel.")
             continue
+
+        # UUS LOOGIKA: Kui Alpaca maht on 0 (või alla miinimumi), siis me EI SKIPPI
+        # Me laseme selle läbi ja kontrollime Yahoo käest
+        check_volume_later = False
         if alpaca_vol < MIN_VOLUME_USD: 
-             print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Maht liiga väike (${alpaca_vol/1000:.1f}k).")
-             continue
+             check_volume_later = True
+             # Me ei prindi siin veel SKIP, vaid vaatame, mida Yahoo ütleb
              
         time.sleep(0.5) 
         print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
-        tech_score, hourly_chg, atr, rsi = get_technical_analysis(s, alpaca_vol)
         
+        # Anname Alpaca mahu kaasa
+        tech_score, hourly_chg, atr, rsi, final_vol = get_technical_analysis(s, alpaca_vol)
+        
+        # NÜÜD kontrollime tegelikku mahtu (Alpaca vs Yahoo suurim)
+        if final_vol < MIN_VOLUME_USD:
+             print(f"      [SKIP] {s} - Maht ikkagi liiga väike (${final_vol/1000:.1f}k).")
+             continue
+
         if hourly_chg > MAX_HOURLY_PUMP: 
              print(f"      ⛔ FOMO: Liiga suur pump ({hourly_chg:.1f}%).")
              continue
