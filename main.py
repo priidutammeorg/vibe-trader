@@ -37,16 +37,10 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v21.1 (REAL-TIME INTELLIGENCE) ---")
+print("--- VIBE TRADER: v22.0 (ADAPTIVE SNIPER) ---")
 
-# --- STRATEEGIA ---
-MIN_FINAL_SCORE = 80       # Kõrge lävend
-COOL_DOWN_HOURS = 2        # Lühem jahutus, kuna me ei kasuta enam mälu
-TRAILING_ACTIVATION = 3.0  
-BREAKEVEN_TRIGGER = 1.5    
-MIN_VOLUME_USD = 10000     
-MAX_HOURLY_PUMP = 5.0      
-MAX_AI_CALLS = 10          
+# --- GLOBAL VARIABLES ---
+MARKET_MODE = "NEUTRAL" # BULL, BEAR, NEUTRAL
 
 trading_client = TradingClient(api_key, secret_key, paper=True)
 data_client = CryptoHistoricalDataClient()
@@ -71,10 +65,13 @@ def update_position_metadata(symbol, atr_value):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     if symbol not in brain["positions"]:
-        brain["positions"][symbol] = {"highest_price": 0, "atr_at_entry": atr_value, "is_risk_free": False}
-    else:
-        if "atr_at_entry" not in brain["positions"][symbol]:
-            brain["positions"][symbol]["atr_at_entry"] = atr_value
+        # Salvestame, millise režiimiga ostsime
+        brain["positions"][symbol] = {
+            "highest_price": 0, 
+            "atr_at_entry": atr_value, 
+            "is_risk_free": False,
+            "entry_mode": MARKET_MODE
+        }
     save_brain(brain)
 
 def update_high_watermark(symbol, current_price, current_rsi=50):
@@ -104,8 +101,12 @@ def get_position_data(symbol):
 def is_cooled_down(symbol):
     brain = load_brain()
     last_sold = brain.get("cool_down", {}).get(symbol)
+    
+    # Karuturul on jahtumine pikem (24h), pulliturul lühem (4h)
+    cooldown_time = 24 if MARKET_MODE == "BEAR" else 4
+    
     if last_sold:
-        if datetime.now() - datetime.fromtimestamp(last_sold) < timedelta(hours=COOL_DOWN_HOURS):
+        if datetime.now() - datetime.fromtimestamp(last_sold) < timedelta(hours=cooldown_time):
             return False
     return True
 
@@ -142,16 +143,18 @@ def get_yahoo_data(symbol, period="1mo", interval="1h"):
         return df.dropna()
     except: return None
 
-def check_market_health():
+def determine_market_mode():
     """
-    KONTROLLIB TURU ÜLDSEISUNDIT (BTC).
+    Määrab turu režiimi BTC järgi.
     """
-    print("🔍 Tervisekontroll: BTC Trend...")
+    global MARKET_MODE
+    print("🔍 Analüüsin turu režiimi (BTC)...")
     df = get_yahoo_data("BTC/USD", period="6mo", interval="1d")
     
     if df is None or len(df) < 50:
-        print("   ⚠️ BTC andmed puuduvad. Ettevaatusabinõuna: EI OSTA.")
-        return False
+        print("   ⚠️ BTC andmed puuduvad. Jään NEUTRAL.")
+        MARKET_MODE = "NEUTRAL"
+        return
         
     current_price = df['close'].iloc[-1]
     sma50 = ta.trend.sma_indicator(df['close'], window=50).iloc[-1]
@@ -159,27 +162,21 @@ def check_market_health():
     if pd.isna(sma50): sma50 = current_price
 
     dist_sma = ((current_price - sma50) / sma50) * 100
-    print(f"   BTC: ${current_price:.0f} | SMA50: ${sma50:.0f} | Dist: {dist_sma:.2f}%")
     
-    # Kui BTC on alla SMA50, siis on keelatud osta
-    if current_price < sma50:
-        print("   ⛔ TURG ON LANGUSES (BTC < SMA50). Ostmine blokeeritud.")
-        return False
-        
-    return True
+    if current_price > sma50:
+        MARKET_MODE = "BULL"
+        print(f"   🟢 TURG ON TUGEV (BULL). BTC ${current_price:.0f} > SMA50 ${sma50:.0f}")
+    else:
+        MARKET_MODE = "BEAR"
+        print(f"   🔴 TURG ON NÕRK (BEAR). BTC ${current_price:.0f} < SMA50 ${sma50:.0f}")
 
 def get_technical_analysis(symbol, alpaca_volume_usd):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
     
-    if df is None or len(df) < 30: 
-        return 0, 0, 0, 0, 0
+    if df is None or len(df) < 30: return 0, 0, 0, 0, 0 # Data check
     
     current_price = df['close'].iloc[-1]
-    
-    yahoo_vol_usd = 0
-    if 'volume' in df.columns:
-        yahoo_vol_usd = df['volume'].iloc[-1] * current_price
-    
+    yahoo_vol_usd = df['volume'].iloc[-1] * current_price if 'volume' in df.columns else 0
     final_vol_usd = max(alpaca_volume_usd, yahoo_vol_usd)
 
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
@@ -187,32 +184,44 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     macd_diff = ta.trend.macd_diff(df['close']).iloc[-1]
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
-    
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close']).iloc[-1]
     
-    if pd.isna(rsi) or pd.isna(adx): return 0, 0, 0, 0, 0
+    if pd.isna(rsi): return 0, 0, 0, 0, 0
 
+    # --- DÜNAAMILINE SKOORIMINE ---
     score = 50
     
-    if rsi < 30: score += 25
-    elif rsi < 40: score += 10
-    elif rsi > 65: score -= 30 
-    
-    if macd_diff > 0: score += 15
-    else: score -= 15 
-    
-    if adx > 25: score += 10
-    else: score -= 5
-    
-    if final_vol_usd < MIN_VOLUME_USD: score = 0
+    if MARKET_MODE == "BULL":
+        # Pulliturul ostame julgemalt
+        if rsi < 30: score += 30
+        elif rsi < 55: score += 15 # Ostame ka väikse languse pealt
+        
+        if macd_diff > 0: score += 10
+        if adx > 25: score += 10
 
-    if score >= 50:
-        macd_str = "POS" if macd_diff > 0 else "NEG"
-        print(f"      📊 {symbol} TECH: RSI={rsi:.1f}, MACD={macd_str}, ADX={adx:.1f}. Skoor: {score}")
+    elif MARKET_MODE == "BEAR":
+        # Karuturul oleme SNAIPERID (ainult sügav põhi)
+        if rsi < 25: score += 40     # OSTA AINULT SIIS, KUI ON VÄGA ODAV
+        elif rsi < 35: score += 10
+        elif rsi > 45: score -= 50   # MÜÜ, ära osta keskel!
+        
+        # Karuturul peab olema tugev volüüm, et põrgata
+        if final_vol_usd > 1000000: score += 10
+        
+        # Macd peab hakkama pöörama
+        if macd_diff > 0: score += 20
+        else: score -= 10
+
+    # Likviidsusfilter
+    min_vol = 50000 if MARKET_MODE == "BEAR" else 10000
+    if final_vol_usd < min_vol: score = 0
+
+    if score >= 60:
+        print(f"      📊 {symbol} ({MARKET_MODE}): RSI={rsi:.1f}, Vol=${final_vol_usd/1000:.0f}k. Skoor: {score}")
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (NO MEMORY) ---
+# --- 3. AI (NO MEMORY) ---
 
 def get_cryptocompare_news(symbol):
     try:
@@ -222,26 +231,25 @@ def get_cryptocompare_news(symbol):
     except: return []
 
 def analyze_coin_ai(symbol):
-    # Eemaldasime mälu kontrolli täielikult.
-    # Iga kord teeme uue päringu, et saada värskeim hinnang.
-    
+    # Reaalajas AI analüüs
     all_news = get_cryptocompare_news(symbol)
-    
     news_text = ""
     if all_news:
         for n in all_news:
             news_text += f"PEALKIRI: {n['title']}\n"
     else: news_text = "Uudiseid pole."
 
-    prompt = f"Analüüsi {symbol} lühiajalist (24h) potentsiaali. Turg on ebakindel. Ole kriitiline. Uudised:\n{news_text}\nHinda 0-100. Vasta AINULT: SKOOR: X"
+    # Kohandame AI prompti vastavalt turule
+    context = "Turg on languses. Otsime AINULT lühiajalist põrget." if MARKET_MODE == "BEAR" else "Turg on tõusus. Otsime head sisenemist."
+
+    prompt = f"Analüüsi {symbol}. {context} Uudised:\n{news_text}\nHinda 0-100. Ole kriitiline. Vasta AINULT: SKOOR: X"
     try:
         res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
         match = re.search(r'SKOOR:\s*(\d+)', res.choices[0].message.content)
         score = int(match.group(1)) if match else 50
     except: score = 50
 
-    print(f"      🤖 AI HINNE (VÄRSKE): {score}/100")
-    # Me ei salvesta enam mällu, sest me ei kasuta seda
+    print(f"      🤖 AI HINNE: {score}/100")
     return score
 
 # --- 4. HALDUS ---
@@ -257,7 +265,7 @@ def manage_existing_positions():
 
     for p in positions:
         symbol = p.symbol
-        time.sleep(2.0)
+        time.sleep(1.0)
         
         entry_price = float(p.avg_entry_price)
         current_price = float(p.current_price)
@@ -265,10 +273,14 @@ def manage_existing_positions():
         
         df = get_yahoo_data(symbol, period="5d", interval="1h")
         
-        current_rsi = 50
-        if df is not None:
-             current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
-             if pd.isna(current_rsi): current_rsi = 50
+        # Kui andmeid pole, siis hoiame, v.a. kui hard stop on läbi
+        if df is None:
+            if current_price < entry_price * 0.93: # Emergency stop -7%
+                 print(f"   ⚠️ {symbol} PIME STOP! Andmeid pole, aga hind kukkus -7%. Müün.")
+                 close_position(symbol)
+            continue
+
+        current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
         
         pos_data = get_position_data(symbol)
         hw = pos_data.get("highest_price", 0)
@@ -281,19 +293,28 @@ def manage_existing_positions():
         if current_price > hw:
             update_high_watermark(symbol, current_price, current_rsi)
             hw = current_price
+        
+        # --- DÜNAAMILINE VÄLJUMINE ---
+        
+        # Karuturul (BEAR) oleme närvilisemad müüjad
+        if MARKET_MODE == "BEAR":
+            trailing_stop = hw - (1.5 * atr)  # Tihe stopp
+            breakeven_trigger = 1.5           # Lukusta kasum juba +1.5% juures
+            hard_stop = entry_price * 0.95    # -5% hard stop
+        else:
+            # Bulliturul laseme joosta
+            trailing_stop = hw - (2.5 * atr)
+            breakeven_trigger = 3.0
+            hard_stop = entry_price * 0.92
+
+        breakeven_price = entry_price * 1.005
+
+        if profit_pct >= breakeven_trigger or is_risk_free:
+            final_stop = max(breakeven_price, hard_stop) # Vähemalt nullis
+            # Kui trailing on kõrgem, kasuta seda
+            if trailing_stop > final_stop: final_stop = trailing_stop
             
-        atr_multiplier = 1.5 if current_rsi > 70 else 2.5
-        trailing_stop = hw - (atr_multiplier * atr)
-        breakeven_stop = entry_price * 1.01
-        
-        hard_stop = entry_price * 0.93 
-        
-        if profit_pct >= TRAILING_ACTIVATION:
-            final_stop = trailing_stop
-            stop_type = "TRAILING 🔥"
-        elif profit_pct >= BREAKEVEN_TRIGGER or is_risk_free:
-            final_stop = max(breakeven_stop, hard_stop)
-            stop_type = "RISK-FREE 🛡️"
+            stop_type = "PROFIT 🛡️"
             if not is_risk_free: set_risk_free_status(symbol)
         else:
             final_stop = hard_stop
@@ -319,11 +340,13 @@ def trade(symbol, score, atr):
     except: return
     if equity < 50: return
     
-    size_pct = 0.05
+    # Karuturul väiksemad panused
+    size_pct = 0.04 if MARKET_MODE == "BEAR" else 0.07
+    
     amount = round(equity * size_pct, 2)
     amount = max(amount, 10)
     
-    print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} eest (Skoor {score}).")
+    print(f"5. TEGIJA ({MARKET_MODE}): Ostame {symbol} ${amount:.2f} eest (Skoor {score}).")
     try:
         req = MarketOrderRequest(symbol=symbol, notional=amount, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
         trading_client.submit_order(req)
@@ -335,15 +358,14 @@ def trade(symbol, score, atr):
 
 def run_cycle():
     print(f"========== TSÜKKEL START ==========") 
+    
+    # 0. Määra režiim (Bull vs Bear)
+    determine_market_mode()
+    
+    # 1. Halda
     manage_existing_positions()
     
-    market_is_safe = check_market_health()
-    
-    if not market_is_safe:
-        print("   ⚠️ TURG ON OHTLIK. OSTMISELE SKIP.")
-        print("========== TSÜKKEL LÕPP ==========")
-        return 
-
+    # 2. Skanner
     print(f"2. SKANNER: Laen KÕIK turu varad...")
     try:
         assets = trading_client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE))
@@ -365,44 +387,38 @@ def run_cycle():
     best_final_score = -1
     best_atr = 0
     ai_calls_made = 0
-    total_coins = len(candidates)
     
-    print(f"   -> Leidsin {total_coins} münti. Alustan analüüsi (Top 10 AI)...")
+    # Karuturul oleme rangemad
+    MIN_SCORE_REQ = 85 if MARKET_MODE == "BEAR" else 75
+    
+    print(f"   -> Leidsin {len(candidates)} münti. Režiim: {MARKET_MODE} (Lävend: {MIN_SCORE_REQ})")
 
     for i, c in enumerate(candidates):
         s = c['symbol']
         clean = s.replace("/", "")
         alpaca_vol = c['vol_usd']
         
-        if clean in my_pos:
-            print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Juba olemas.")
-            continue
-        if not is_cooled_down(s):
-            print(f"   [{i+1}/{total_coins}] [SKIP] {s} - Jahutusel.")
-            continue
+        if clean in my_pos: continue
+        if not is_cooled_down(s): continue
 
-        if alpaca_vol < MIN_VOLUME_USD: 
-             continue
+        # Karuturul nõuame suuremat volüümi
+        vol_limit = 50000 if MARKET_MODE == "BEAR" else 10000
+        if alpaca_vol < vol_limit: continue
              
-        time.sleep(2.0)
-        print(f"   [{i+1}/{total_coins}] Kontrollin: {s}...")
+        time.sleep(1.5) # Viisakas paus Yahoo jaoks
+        print(f"   [{i+1}] Kontrollin: {s}...")
         
         tech_score, hourly_chg, atr, rsi, final_vol = get_technical_analysis(s, alpaca_vol)
         
-        if tech_score == 0:
+        if tech_score == 0: # Andmed puudu
              print(f"      ❌ {s} - Andmed puuduvad. SKIP.")
              continue
 
-        if final_vol < MIN_VOLUME_USD:
-             print(f"      [SKIP] {s} - Maht ikkagi liiga väike (${final_vol/1000:.1f}k).")
-             continue
-
-        if hourly_chg > MAX_HOURLY_PUMP: 
-             print(f"      ⛔ FOMO: Liiga suur pump ({hourly_chg:.1f}%).")
-             continue
-        if tech_score < 50: 
+        # Eelfilter: Ära isegi küsi AI-lt, kui tehniline pilt on halb
+        if tech_score < 60:
              print(f"      ❌ Nõrk tehnika ({tech_score}).")
              continue
+             
         if ai_calls_made >= MAX_AI_CALLS:
             print("   ⚠️ AI limiit täis.")
             break
@@ -419,11 +435,11 @@ def run_cycle():
             best_coin = c
             best_atr = atr
 
-    if best_coin and best_final_score >= MIN_FINAL_SCORE:
+    if best_coin and best_final_score >= MIN_SCORE_REQ:
         print(f"--- VÕITJA: {best_coin['symbol']} (Skoor: {best_final_score:.1f}) ---")
         trade(best_coin['symbol'], best_final_score, best_atr)
     else:
-        print(f"--- TULEMUS: Parim {best_coin['symbol'] if best_coin else '-'} ei ületanud lävendit.")
+        print(f"--- TULEMUS: Parim {best_coin['symbol'] if best_coin else '-'} ei ületanud lävendit ({MIN_SCORE_REQ}).")
     
     print(f"========== TSÜKKEL LÕPP ==========")
 
