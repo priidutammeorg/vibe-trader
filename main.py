@@ -5,7 +5,7 @@ import builtins
 import re
 import requests
 import json
-import hashlib
+import xml.etree.ElementTree as ET
 import pandas as pd
 import ta
 import yfinance as yf
@@ -37,7 +37,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v22.1 (AGGRESSIVE BEAR) ---")
+print("--- VIBE TRADER: v22.3 (GOOGLE INTEL) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -104,10 +104,7 @@ def get_position_data(symbol):
 def is_cooled_down(symbol):
     brain = load_brain()
     last_sold = brain.get("cool_down", {}).get(symbol)
-    
-    # Kui turg on karune, tahame kiiremini uuesti proovida, kui hind veel kukub
     cooldown_time = 6 
-    
     if last_sold:
         if datetime.now() - datetime.fromtimestamp(last_sold) < timedelta(hours=cooldown_time):
             return False
@@ -136,6 +133,8 @@ def format_symbol_for_yahoo(symbol):
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
+        # Väike paus Yahoo jaoks
+        time.sleep(1.5)
         y_symbol = format_symbol_for_yahoo(symbol)
         df = yf.download(y_symbol, period=period, interval=interval, progress=False, timeout=10)
         
@@ -197,17 +196,13 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
         if adx > 25: score += 10
 
     elif MARKET_MODE == "BEAR":
-        # AGRESSIIVSEM KARUTURU SKOORIMINE
-        # Anname rohkem punkte madalale RSI-le, et ületada 75 lävendit
-        if rsi < 25: score += 45     # Väga tugev ost
-        elif rsi < 35: score += 25   # Tugev ost
-        elif rsi < 40: score += 10   # Nõrk ost
-        elif rsi > 45: score -= 50   # Keelatud tsoon
+        if rsi < 25: score += 45     
+        elif rsi < 35: score += 25   
+        elif rsi < 40: score += 10   
+        elif rsi > 45: score -= 50   
         
-        # Volüüm on tähtis
         if final_vol_usd > 1000000: score += 10
-        
-        if macd_diff > 0: score += 15 # Pööre toimumas
+        if macd_diff > 0: score += 15 
 
     if final_vol_usd < 10000: score = 0
 
@@ -216,33 +211,63 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI (NO MEMORY) ---
+# --- 3. AI & UUDISED (GOOGLE NEWS) ---
 
-def get_cryptocompare_news(symbol):
+def get_google_news(symbol):
+    """
+    Tõmbab Google News RSS feedi konkreetse mündi kohta.
+    See on väga täpne ja kiire viis saada infot.
+    """
     try:
-        clean = symbol.split("/")[0]
-        res = requests.get(f"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories={clean}", timeout=5)
-        return [{'title': i.get('title'), 'body': i.get('body'), 'link': i.get('url')} for i in res.json().get('Data', [])[:3]]
-    except: return []
+        clean_ticker = symbol.split("/")[0] # nt 'BTC'
+        # Google News RSS URL: Otsime "MÜNT crypto", viimased 24h
+        url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        res = requests.get(url, headers=headers, timeout=4)
+        
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            news_items = []
+            # Võtame 3 esimest uudist
+            for item in root.findall('.//item')[:3]:
+                title = item.find('title').text
+                pub_date = item.find('pubDate').text
+                news_items.append(f"- {title} ({pub_date})")
+            
+            return "\n".join(news_items) if news_items else "Värsked uudised puuduvad."
+            
+        return "Uudiste päring ebaõnnestus."
+    except Exception as e:
+        return f"Viga uudistes: {e}"
 
 def analyze_coin_ai(symbol):
-    all_news = get_cryptocompare_news(symbol)
-    news_text = ""
-    if all_news:
-        for n in all_news:
-            news_text += f"PEALKIRI: {n['title']}\n"
-    else: news_text = "Uudiseid pole."
+    news_text = get_google_news(symbol)
+    
+    context = "Turg on languses (BEAR). Otsime AINULT lühiajalist põrget (scalp)." if MARKET_MODE == "BEAR" else "Turg on tõusus. Otsime head sisenemist."
 
-    context = "Turg on languses. Otsime AINULT lühiajalist põrget (scalp)." if MARKET_MODE == "BEAR" else "Turg on tõusus. Otsime head sisenemist."
-
-    prompt = f"Analüüsi {symbol}. {context} Uudised:\n{news_text}\nHinda 0-100. Ole realistlik. Vasta AINULT: SKOOR: X"
+    prompt = f"""
+    Analüüsi krüptovaluutat {symbol}.
+    Kontekst: {context}
+    
+    Viimased 24h Google News pealkirjad:
+    {news_text}
+    
+    Ülesanne: Hinda lühiajalist (24h) potentsiaali skaalal 0-100.
+    Kui uudised on negatiivsed või räägivad häkkimistest/pettusest, anna väga madal hinne.
+    
+    Vasta AINULT kujul: SKOOR: X
+    """
     try:
         res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
         match = re.search(r'SKOOR:\s*(\d+)', res.choices[0].message.content)
         score = int(match.group(1)) if match else 50
     except: score = 50
 
-    print(f"      🤖 AI HINNE: {score}/100")
+    print(f"      🤖 AI HINNE (Google News): {score}/100")
     return score
 
 # --- 4. HALDUS ---
@@ -267,7 +292,6 @@ def manage_existing_positions():
         df = get_yahoo_data(symbol, period="5d", interval="1h")
         
         if df is None:
-            # Hädaabi stop, kui andmeid pole ja hind kukub
             if current_price < entry_price * 0.93: 
                  print(f"   ⚠️ {symbol} PIME STOP! Hind kukkus -7%. Müün.")
                  close_position(symbol)
@@ -287,11 +311,9 @@ def manage_existing_positions():
             update_high_watermark(symbol, current_price, current_rsi)
             hw = current_price
         
-        # --- DÜNAAMILINE VÄLJUMINE ---
         if MARKET_MODE == "BEAR":
-            # Karuturul võtame kasumi kiirelt (scalping)
             trailing_stop = hw - (1.5 * atr)
-            breakeven_trigger = 1.0 # Juba 1% kasumis paneme stopi nulli
+            breakeven_trigger = 1.0 
             hard_stop = entry_price * 0.94
         else:
             trailing_stop = hw - (2.5 * atr)
@@ -349,7 +371,6 @@ def run_cycle():
     determine_market_mode()
     manage_existing_positions()
     
-    # Karuturul ei bloki täielikult, vaid nõuame kõrget kvaliteeti
     if MARKET_MODE == "BEAR":
         print("   ⚠️ TURG ON LANGUSES. Otsin ainult sügavaid põhju (RSI < 35).")
 
@@ -375,7 +396,6 @@ def run_cycle():
     best_atr = 0
     ai_calls_made = 0
     
-    # Karuturul lävend 75, Pulliturul 75 (aga skoorimine on erinev)
     MIN_SCORE_REQ = 75 
     
     print(f"   -> Leidsin {len(candidates)} münti.")
@@ -387,10 +407,9 @@ def run_cycle():
         
         if clean in my_pos: continue
         if not is_cooled_down(s): continue
-
         if alpaca_vol < 10000: continue
              
-        time.sleep(1.5)
+        time.sleep(2.0) 
         print(f"   [{i+1}] Kontrollin: {s}...")
         
         tech_score, hourly_chg, atr, rsi, final_vol = get_technical_analysis(s, alpaca_vol)
@@ -399,7 +418,6 @@ def run_cycle():
              print(f"      ❌ {s} - Andmed puuduvad. SKIP.")
              continue
 
-        # Eelfilter: Kui tehniline pilt on nõrk, ära küsi AI-lt
         if tech_score < 55:
              print(f"      ❌ Nõrk tehnika ({tech_score}).")
              continue
@@ -408,7 +426,7 @@ def run_cycle():
             print("   ⚠️ AI limiit täis.")
             break
             
-        print(f"   🔥 LEID: {s} on kuum (Tech: {tech_score}). Küsin AI-lt...")
+        print(f"   🔥 LEID: {s} on kuum (Tech: {tech_score}). Küsin AI-lt (Google News)...")
         ai_score = analyze_coin_ai(s)
         ai_calls_made += 1
         
