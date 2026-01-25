@@ -30,23 +30,26 @@ BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
 AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")     
 
-# --- LOGIMISE FUNKTSIOON ---
+# --- LOGIMISE FUNKTSIOON (FIXED) ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     kwargs.pop('flush', None)
     msg = " ".join(map(str, args))
     formatted_msg = f"[{now}] {msg}"
     
+    # 1. KIRJUTA FAIL (See on peamine)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(formatted_msg + "\n")
     except Exception as e:
         builtins.print(f"[SYSTEM ERROR] Logi viga: {e}")
 
+    # 2. PRINDI EKRAANILET AINULT KUI EI OLE CRON
+    # See väldib topeltkirjeid logis, kui cron on valesti seadistatud
     if sys.stdout.isatty():
         builtins.print(formatted_msg, flush=True, **kwargs)
 
-# --- CRASH CATCHER START ---
+# --- CRASH CATCHER ---
 try:
     load_dotenv(os.path.join(BASE_DIR, ".env"))
     api_key = os.getenv("ALPACA_API_KEY")
@@ -56,8 +59,6 @@ try:
     if not api_key:
         print("CRITICAL: API võtmed puudu!")
         exit()
-
-    print("--- VIBE TRADER: v32.0 (FULL AI RESTORED) ---")
 
     MARKET_MODE = "NEUTRAL" 
     trading_client = TradingClient(api_key, secret_key, paper=True)
@@ -69,7 +70,6 @@ try:
 
 except Exception as e:
     print(f"CRITICAL STARTUP ERROR: {e}")
-    builtins.print(f"CRITICAL STARTUP ERROR: {e}") 
     exit()
 
 # --- 1. MÄLU JA HALDUS ---
@@ -200,7 +200,7 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
         elif rsi < 55: score += 15
         if macd_diff > 0: score += 10 
     elif MARKET_MODE == "BEAR":
-        # Konservatiivne (RSI < 30)
+        # RSI < 30 STRATEEGIA
         if rsi < 25: score += 45     
         elif rsi < 30: score += 25  
         elif rsi > 45: score -= 50   
@@ -212,7 +212,7 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), atr, rsi
 
-# --- 3. UUDISED JA AI (TÄISMAHUS TAGASI) ---
+# --- 3. UUDISED JA AI ---
 
 def scrape_with_trafilatura(url):
     try:
@@ -245,7 +245,6 @@ def get_backup_news_rss(symbol):
 
 def get_news_ddg(symbol):
     try:
-        # TEE PAUS!
         sleep_time = random.uniform(5, 10)
         print(f"      ⏳ Uudised: ootan {sleep_time:.1f}s...")
         time.sleep(sleep_time)
@@ -263,7 +262,6 @@ def get_news_ddg(symbol):
             link = item.get('url', '')
             date = item.get('date', 'Today')
             
-            # Lihtne proovimine trafilaturaga
             content = scrape_with_trafilatura(link)
             if not content: content = item.get('body', 'No content')
             
@@ -277,7 +275,7 @@ def get_news_ddg(symbol):
 def analyze_coin_ai(symbol):
     news_text = get_news_ddg(symbol)
     if "Backup error" in news_text or len(news_text) < 50:
-        return 50 # Neutraalne, kui uudiseid pole
+        return 50 
     
     market_context = "BEAR MARKET (Trend is DOWN). Use EXTREME CAUTION." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
 
@@ -331,10 +329,7 @@ def close_position(symbol, reason="UNKNOWN"):
         entry = float(pos.avg_entry_price)
         curr = float(pos.current_price)
         
-        # SULGE POSITSIOON
         trading_client.close_position(symbol)
-        
-        # LOGI
         log_trade_to_csv(symbol, entry, curr, qty, reason)
         activate_cooldown(symbol)
         print(f"      ✅ MÜÜDUD: {symbol} (Põhjus: {reason})")
@@ -342,7 +337,7 @@ def close_position(symbol, reason="UNKNOWN"):
         print(f"      ❌ Viga sulgemisel: {e}")
 
 def manage_existing_positions():
-    print("1. PORTFELL...")
+    print("2. POSITSIOONIDE HALDUS...")
     try: positions = trading_client.get_all_positions()
     except: return
 
@@ -387,14 +382,27 @@ def trade(symbol, score, atr):
         print(f"   -> Viga ostul: {e}")
 
 def run_cycle():
-    print(f"========== TSÜKKEL START (CRON) ==========") 
+    # --- VERSIOON JA ALGUS (ALATI NÄHTAV) ---
+    print("="*40)
+    print("--- VIBE TRADER: v32.2 (CLEAN LOGS & PROFIT) ---")
+    print(f"=== TSÜKKEL START: {datetime.now()} ===")
+    
+    # --- UUS: KONTO SEIS ---
+    try:
+        acct = trading_client.get_account()
+        equity = float(acct.equity)
+        cash = float(acct.cash)
+        print(f"1. KONTO SEIS: Equity ${equity:,.2f} | Cash ${cash:,.2f}")
+    except:
+        print("1. KONTO SEIS: Info kättesaamatu")
+
     determine_market_mode()
     manage_existing_positions()
     
     if MARKET_MODE == "BEAR":
         print("   ⚠️ TURG ON LANGUSES. Otsin RSI < 30.")
 
-    print(f"2. SKANNER...")
+    print(f"3. SKANNER...")
     try:
         assets = trading_client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE))
         tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD")]
@@ -428,7 +436,6 @@ def run_cycle():
             ai_score = analyze_coin_ai(s)
             ai_calls_made += 1
             
-            # KOMBINEERITUD SKOOR (60% Tech, 40% AI)
             final_score = (tech_score * 0.6) + (ai_score * 0.4)
             print(f"      🏁 LÕPPHINNE: {final_score:.1f}")
 
@@ -438,6 +445,7 @@ def run_cycle():
                 break 
 
     print(f"========== TSÜKKEL LÕPP ==========")
+    print("="*40 + "\n")
 
 if __name__ == "__main__":
     try:
