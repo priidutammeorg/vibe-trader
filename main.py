@@ -18,7 +18,7 @@ from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
-from newspaper import Article, Config  # UUS: Artiklite lugemiseks
+import trafilatura # UUS: Moodne skreipija
 
 # --- 0. SEADISTUS JA FAILID ---
 LOG_FILE = "bot.log"
@@ -41,7 +41,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v28 (DEEP READER EDITION) ---")
+print("--- VIBE TRADER: v29 (TRAFILATURA SMART READER) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -226,89 +226,94 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (DEEP SCRAPING) ---
+# --- 3. AI & UUDISED (TRAFILATURA SCRAPING) ---
 
-def scrape_article_content(url):
+def scrape_with_trafilatura(url):
     """
-    Laeb alla artikli täisteksti kasutades newspaper3k teeki.
+    Kasutab trafilatura teeki, mis on palju targem küpsiste/reklaamide eemaldamisel.
     """
     try:
-        # Konfigureerime brauseri maski
-        conf = Config()
-        conf.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        conf.request_timeout = 4
-        
-        article = Article(url, config=conf)
-        article.download()
-        article.parse()
-        
-        # Tagastame esimesed 2000 tähemärki (AI mälu säästmiseks)
-        return article.text[:2000] + "..." if len(article.text) > 100 else "Content too short or protected."
-    except Exception as e:
-        return f"Error scraping: {e}"
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded)
+            if text:
+                # Kontroll: kas tekst on Google'i küpsise hoiatus?
+                if "Non-personalized content" in text or "Before you continue to Google" in text:
+                    return None # See on rämps, proovime teist uudist
+                return text[:2500] # Tagastame esimesed 2500 märki
+    except: pass
+    return None
 
 def get_google_news_deep(symbol):
     try:
         clean_ticker = symbol.split("/")[0] 
+        # Kasutame siin teist RSS URLi struktuuri, mis vahel annab paremaid linke
         url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         res = requests.get(url, headers=headers, timeout=5)
         
         full_report = []
+        valid_articles_count = 0
         
         if res.status_code == 200:
             root = ET.fromstring(res.content)
-            items = root.findall('.//item')[:3] # Võtame ainult 3 kõige uuemat, et aega säästa
+            items = root.findall('.//item')
             
-            for i, item in enumerate(items):
+            # Proovime läbi kuni 6 artiklit, aga lõpetame kui saame 2 head kätte
+            for item in items:
+                if valid_articles_count >= 2: break
+                
                 title = item.find('title').text
                 link = item.find('link').text
                 pub_date = item.find('pubDate').text
                 
-                # LAE TÄISPIKK ARTIKKEL
-                # Google News lingid on sageli redirectid, newspaper3k saab sellega tavaliselt hakkama
-                content = scrape_article_content(link)
+                # LAE ARTIKKEL TRAFILATURAGA
+                content = scrape_with_trafilatura(link)
                 
-                full_report.append(f"--- ARTICLE {i+1} ---\nTITLE: {title}\nDATE: {pub_date}\nFULL CONTENT:\n{content}\n")
-                
-            return "\n".join(full_report) if full_report else "No news found."
+                if content:
+                    full_report.append(f"--- ARTICLE ---\nTITLE: {title}\nDATE: {pub_date}\nCONTENT:\n{content}\n")
+                    valid_articles_count += 1
+                else:
+                    # Kui sisu ei saanud kätte (või oli küpsise rämps), siis lisame vähemalt pealkirja
+                    full_report.append(f"--- ARTICLE (Headline Only) ---\nTITLE: {title}\nDATE: {pub_date}\n(Content blocked by cookie wall)\n")
+
+            return "\n".join(full_report) if full_report else "No accessible news found."
         return "News fetch error."
     except Exception as e:
         return f"Error fetching news: {e}"
 
 def analyze_coin_ai(symbol):
-    # Kasutame nüüd DEEP funktsiooni
     news_text = get_google_news_deep(symbol)
     
     market_context = "BEAR MARKET (Trend is DOWN). Use EXTREME CAUTION." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
 
     prompt = f"""
-    You are an Elite Crypto Trader for a top Hedge Fund.
-    Analyze the following FULL NEWS ARTICLES for {symbol} to decide on an immediate (24h) entry.
+    You are an Elite Crypto Trader.
+    Analyze the following NEWS for {symbol} to decide on an immediate (24h) entry.
     
     MARKET CONTEXT: {market_context}
     
-    === NEWS REPORT (FULL TEXT) ===
+    === NEWS REPORT ===
     {news_text}
     
     === INSTRUCTIONS ===
-    1. READ THE "FULL CONTENT". Do not just rely on titles.
-    2. FILTER NOISE:
-       - Ignore "Price Predictions" (e.g. "XRP to $500"). Score 50.
-       - Ignore generic SEO spam.
-    3. DETECT CATALYSTS (Signal):
-       - BULLISH (Score 80-100): ETF Approval, Major Partnership (Visa/Mastercard), Court Victory, Coinbase Listing.
-       - BEARISH (Score 0-20): SEC Lawsuit, Hack, Delisting, Bankruptcy, Minting Glitch.
+    1. If content says "Content blocked" or is generic, rely on the TITLE but reduce confidence score.
+    2. FILTER NOISE: Ignore "Price Prediction 2030" or SEO spam. Score them 50.
+    3. DETECT CATALYSTS:
+       - BULLISH (80-100): ETF Approval, Major Partnership, Court Victory.
+       - BEARISH (0-20): SEC Lawsuit, Hack, Delisting.
     
     === SCORING ===
-    - 0-30: BAD NEWS. Hard Sell/Avoid.
-    - 31-49: Weak/Bearish sentiment.
-    - 50: Neutral / No meaningful news.
-    - 51-79: Good vibes / Minor upgrades.
-    - 80-100: NEWS BOMBSHELL. Buy immediately.
+    - 0-30: BAD NEWS. Sell.
+    - 31-49: Bearish/Weak.
+    - 50: Neutral / No real news.
+    - 51-79: Good vibes.
+    - 80-100: STRONG BUY.
     
     RESPONSE FORMAT (JSON):
-    {{"score": X, "reason": "Detailed reason citing specific facts from the articles"}}
+    {{"score": X, "reason": "Detailed reason citing specific facts"}}
     """
     
     score = 50
@@ -477,7 +482,7 @@ def run_cycle():
             print("   ⚠️ AI limiit täis.")
             break
             
-        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (Deep Read)...")
+        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (Trafilatura)...")
         ai_score = analyze_coin_ai(s)
         ai_calls_made += 1
         
