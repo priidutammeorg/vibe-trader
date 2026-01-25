@@ -18,6 +18,7 @@ from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
+from newspaper import Article, Config  # UUS: Artiklite lugemiseks
 
 # --- 0. SEADISTUS JA FAILID ---
 LOG_FILE = "bot.log"
@@ -40,7 +41,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v27 (CRONTAB EDITION) ---")
+print("--- VIBE TRADER: v28 (DEEP READER EDITION) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -92,7 +93,7 @@ def log_ai_prompt(symbol, prompt_text, response_text):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(AI_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] 🧠 ANALÜÜS: {symbol}\n")
-            f.write("👇 --- INPUT (PROMPT) ---\n")
+            f.write("👇 --- INPUT (PROMPT & ARTICLES) ---\n")
             f.write(prompt_text.strip() + "\n")
             f.write("👆 --- OUTPUT (AI DECISION) ---\n")
             f.write(response_text.strip() + "\n")
@@ -225,57 +226,89 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (HEDGE FUND INTELLIGENCE) ---
+# --- 3. AI & UUDISED (DEEP SCRAPING) ---
 
-def get_google_news(symbol):
+def scrape_article_content(url):
+    """
+    Laeb alla artikli täisteksti kasutades newspaper3k teeki.
+    """
+    try:
+        # Konfigureerime brauseri maski
+        conf = Config()
+        conf.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        conf.request_timeout = 4
+        
+        article = Article(url, config=conf)
+        article.download()
+        article.parse()
+        
+        # Tagastame esimesed 2000 tähemärki (AI mälu säästmiseks)
+        return article.text[:2000] + "..." if len(article.text) > 100 else "Content too short or protected."
+    except Exception as e:
+        return f"Error scraping: {e}"
+
+def get_google_news_deep(symbol):
     try:
         clean_ticker = symbol.split("/")[0] 
         url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=5)
         
+        full_report = []
+        
         if res.status_code == 200:
             root = ET.fromstring(res.content)
-            news_items = []
-            for item in root.findall('.//item')[:5]:
+            items = root.findall('.//item')[:3] # Võtame ainult 3 kõige uuemat, et aega säästa
+            
+            for i, item in enumerate(items):
                 title = item.find('title').text
-                raw_desc = item.find('description').text if item.find('description') is not None else ""
-                clean_desc = re.sub('<[^<]+?>', '', raw_desc)
+                link = item.find('link').text
                 pub_date = item.find('pubDate').text
-                news_items.append(f"TITLE: {title}\nSUMMARY: {clean_desc[:300]}...\nDATE: {pub_date}\n---")
-            return "\n".join(news_items) if news_items else "No significant news found."
+                
+                # LAE TÄISPIKK ARTIKKEL
+                # Google News lingid on sageli redirectid, newspaper3k saab sellega tavaliselt hakkama
+                content = scrape_article_content(link)
+                
+                full_report.append(f"--- ARTICLE {i+1} ---\nTITLE: {title}\nDATE: {pub_date}\nFULL CONTENT:\n{content}\n")
+                
+            return "\n".join(full_report) if full_report else "No news found."
         return "News fetch error."
     except Exception as e:
         return f"Error fetching news: {e}"
 
 def analyze_coin_ai(symbol):
-    news_text = get_google_news(symbol)
-    market_context = "BEAR MARKET (Trend is DOWN). Look for CATALYSTS." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
+    # Kasutame nüüd DEEP funktsiooni
+    news_text = get_google_news_deep(symbol)
+    
+    market_context = "BEAR MARKET (Trend is DOWN). Use EXTREME CAUTION." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
 
     prompt = f"""
-    You are a Senior Crypto Analyst at a Wall Street Hedge Fund.
-    Analyze News Sentiment for {symbol} regarding Immediate (24h) Price Action.
+    You are an Elite Crypto Trader for a top Hedge Fund.
+    Analyze the following FULL NEWS ARTICLES for {symbol} to decide on an immediate (24h) entry.
     
     MARKET CONTEXT: {market_context}
     
-    LATEST NEWS (RSS):
+    === NEWS REPORT (FULL TEXT) ===
     {news_text}
     
-    INSTRUCTIONS:
-    1. IGNORE "Opinion Pieces" (e.g., "Price Prediction 2030"). These are NOISE. Score them 50.
-    2. LOOK FOR "CATALYSTS":
-       - ETF Filings/Approvals, Partnerships, Exchange Listings (BULLISH -> Score 75-100).
-       - Hacks, Lawsuits, SEC, Delistings (BEARISH -> Score 0-20).
+    === INSTRUCTIONS ===
+    1. READ THE "FULL CONTENT". Do not just rely on titles.
+    2. FILTER NOISE:
+       - Ignore "Price Predictions" (e.g. "XRP to $500"). Score 50.
+       - Ignore generic SEO spam.
+    3. DETECT CATALYSTS (Signal):
+       - BULLISH (Score 80-100): ETF Approval, Major Partnership (Visa/Mastercard), Court Victory, Coinbase Listing.
+       - BEARISH (Score 0-20): SEC Lawsuit, Hack, Delisting, Bankruptcy, Minting Glitch.
     
-    SCORING (0-100):
-    - 0-30: Bad news/FUD. Sell.
-    - 31-49: Weak sentiment.
-    - 50: Neutral / Only "Price Predictions".
-    - 51-74: Mild positive buzz.
-    - 75-100: STRONG BUY (Confirmed Catalyst).
+    === SCORING ===
+    - 0-30: BAD NEWS. Hard Sell/Avoid.
+    - 31-49: Weak/Bearish sentiment.
+    - 50: Neutral / No meaningful news.
+    - 51-79: Good vibes / Minor upgrades.
+    - 80-100: NEWS BOMBSHELL. Buy immediately.
     
     RESPONSE FORMAT (JSON):
-    {{"score": X, "reason": "Short summary of why"}}
+    {{"score": X, "reason": "Detailed reason citing specific facts from the articles"}}
     """
     
     score = 50
@@ -296,7 +329,7 @@ def analyze_coin_ai(symbol):
         reason = f"Error: {e}"
         score = 50
 
-    print(f"      🤖 AI ANALÜÜS: {score}/100 | {reason}")
+    print(f"      🤖 AI ANALÜÜS: {score}/100 | {reason[:100]}...")
     log_ai_prompt(symbol, prompt, f"SCORE: {score}\nREASON: {reason}\nFULL_JSON: {full_response}")
     return score
 
@@ -444,7 +477,7 @@ def run_cycle():
             print("   ⚠️ AI limiit täis.")
             break
             
-        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Küsin AI-lt...")
+        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (Deep Read)...")
         ai_score = analyze_coin_ai(s)
         ai_calls_made += 1
         
