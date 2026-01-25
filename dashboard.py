@@ -1,131 +1,105 @@
-from flask import Flask
+import streamlit as st
+import pandas as pd
 import os
-import re
+import time
 
-app = Flask(__name__)
+# --- SEADISTUS ---
+CSV_FILE = "trade_archive.csv"
 LOG_FILE = "bot.log"
+PAGE_TITLE = "🤖 Vibe Trader Live Dashboard"
 
-def get_log_content():
+# Lehe seadistus (lai vaade)
+st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+
+# --- FUNKTSIOONID ---
+
+def load_data():
+    """Loeb ajaloo CSV-st"""
+    if not os.path.exists(CSV_FILE):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(CSV_FILE)
+        df['Time'] = pd.to_datetime(df['Time'])
+        return df
+    except:
+        return pd.DataFrame()
+
+def load_logs():
+    """Loeb viimased logid"""
     if not os.path.exists(LOG_FILE):
-        return []
-    
+        return ["Logifail puudub."]
     try:
-        with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(LOG_FILE, "r") as f:
             lines = f.readlines()
-    except Exception as e:
-        return [[{"ts": "ERROR", "msg": f"Ei saanud logi lugeda: {e}", "class": "msg-error"}]]
+        return lines[-100:][::-1] # Viimased 100 rida, tagurpidi
+    except:
+        return ["Viga logide lugemisel."]
+
+# --- LEHE SISU ---
+
+st.title(f"🚀 {PAGE_TITLE}")
+st.markdown("---")
+
+# Nupp käsitsi värskendamiseks
+if st.button('🔄 Värskenda andmeid'):
+    st.rerun()
+
+# 1. STATISTIKA ARVUTAMINE
+df = load_data()
+
+col1, col2, col3, col4 = st.columns(4)
+
+if not df.empty:
+    total_profit = df['Profit USD'].sum()
+    win_count = len(df[df['Profit USD'] > 0])
+    loss_count = len(df[df['Profit USD'] <= 0])
+    total_trades = len(df)
+    win_rate = (win_count / total_trades) * 100 if total_trades > 0 else 0
     
-    cycles = []
-    current_cycle = []
+    last_trade = df.iloc[-1]
     
-    for line in reversed(lines):
-        clean_line = line.strip()
-        if not clean_line: continue
-        
-        match = re.match(r'^\[(.*?)] (.*)', clean_line)
-        if match:
-            ts = match.group(1)
-            msg = match.group(2)
-        else:
-            ts = "-"
-            msg = clean_line
-
-        if "========== TSÜKKEL START ==========" in msg:
-            if current_cycle:
-                cycles.append(current_cycle)
-                current_cycle = []
-            continue
-            
-        if "========== TSÜKKEL LÕPP ==========" in msg:
-            continue
-
-        row_class = "msg-info"
-        if "TEGIJA: Ostame" in msg or "TEHTUD! Ostetud" in msg: row_class = "msg-buy"
-        elif "Müün" in msg or "STOP HIT" in msg: row_class = "msg-sell"
-        elif "VÕITJA" in msg: row_class = "msg-winner"
-        elif "RISK-FREE" in msg: row_class = "msg-riskfree"
-        elif "UUDIS" in msg: row_class = "msg-news"
-        elif "[SKIP]" in msg: row_class = "msg-skip"
-        elif "Failed" in msg or "Error" in msg or "Traceback" in msg: row_class = "msg-error"
-        elif "LEID:" in msg: row_class = "msg-hot"
-
-        try:
-            msg = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank">LINK ↗</a>', msg)
-        except: pass
-        
-        current_cycle.append({"ts": ts, "msg": msg, "class": row_class})
-            
-    if current_cycle:
-        cycles.append(current_cycle)
-        
-    return cycles
-
-@app.route('/')
-def index():
-    try:
-        cycles = get_log_content()
-    except Exception as e:
-        return f"<h1>VIGA DASHBOARDI LAADIMISEL</h1><p>{e}</p>"
+    # KUVAME MEETRIKAD
+    col1.metric("💰 Kogukasum (PnL)", f"${total_profit:.2f}", delta_color="normal")
+    col2.metric("🎯 Võiduprotsent", f"{win_rate:.1f}%", f"{win_count}W / {loss_count}L")
+    col3.metric("📊 Tehingute arv", f"{total_trades}")
     
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Vibe Trader 2.2</title>
-        <meta http-equiv="refresh" content="5">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body { 
-                background: #0f172a; 
-                color: #cbd5e1; 
-                font-family: 'Consolas', 'Monaco', monospace; 
-                padding: 20px; 
-                max-width: 1100px; 
-                margin: 0 auto; 
-                font-size: 13px; 
-            }
-            h1 { color: #38bdf8; text-align: center; margin-bottom: 20px; font-family: sans-serif; }
-            .cycle-box {
-                background: #1e293b;
-                border: 1px solid #334155;
-                border-radius: 8px;
-                margin-bottom: 20px;
-                padding: 5px 0;
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-            }
-            .row { display: flex; padding: 3px 15px; border-bottom: 1px solid #253045; }
-            .row:last-child { border-bottom: none; }
-            .row:hover { background: #28364d; }
-            .ts { color: #64748b; min-width: 140px; font-size: 11px; margin-right: 15px; display: flex; align-items: center; }
-            .msg { word-break: break-word; line-height: 1.4; width: 100%; }
-            a { color: #38bdf8; text-decoration: none; border-bottom: 1px dotted #38bdf8; }
-            
-            .msg-info { color: #94a3b8; }
-            .msg-buy { color: #10b981; font-weight: bold; background: rgba(16, 185, 129, 0.1); padding: 2px 5px; border-radius: 3px;}
-            .msg-sell { color: #f59e0b; font-weight: bold; background: rgba(245, 158, 11, 0.1); padding: 2px 5px; border-radius: 3px;}
-            .msg-winner { color: #d8b4fe; font-weight: bold; border-bottom: 1px solid #a855f7; }
-            .msg-riskfree { color: #60a5fa; font-weight: bold; }
-            .msg-hot { color: #f472b6; }
-            .msg-news { color: #e2e8f0; font-style: italic; }
-            .msg-skip { color: #475569; font-size: 11px; }
-            .msg-error { color: #ef4444; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <h1>🤖 VIBE TRADER LIVE</h1>
-    """
+    last_pnl = last_trade['Profit USD']
+    last_color = "normal" if last_pnl == 0 else "off" # Streamlit hack värvideks
+    col4.metric(
+        "⏱ Viimane tehing", 
+        f"{last_trade['Symbol']}", 
+        f"${last_pnl:.2f} ({last_trade['Reason']})"
+    )
     
-    if not cycles:
-        html += "<p style='text-align:center; color:#64748b;'>Logi on tühi. Bot käivitub...</p>"
+    # 2. GRAAFIKUD
+    st.subheader("📈 Kasumikõver (Equity Curve)")
     
-    for cycle in cycles:
-        html += '<div class="cycle-box">'
-        for row in cycle:
-            html += f"""<div class="row"><div class="ts">{row['ts']}</div><div class="msg {row['class']}">{row['msg']}</div></div>"""
-        html += '</div>'
+    # Arvutame jooksva kasumi
+    df = df.sort_values(by='Time')
+    df['Cumulative Profit'] = df['Profit USD'].cumsum()
+    
+    st.line_chart(df, x='Time', y='Cumulative Profit')
+    
+    # 3. TABEL
+    with st.expander("📂 Vaata tehingute ajalugu (Detailid)"):
+        st.dataframe(df.sort_values(by='Time', ascending=False).style.format({
+            'Profit USD': '${:.2f}',
+            'Profit %': '{:.2f}%',
+            'Entry Price': '${:.4f}',
+            'Exit Price': '${:.4f}'
+        }))
 
-    html += "</body></html>"
-    return html
+else:
+    st.warning("📭 Ajalugu on tühi. Oota esimest tehingut (müüki).")
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000)
+st.markdown("---")
+
+# 4. LIVE LOGID
+st.subheader("📟 Boti Aju (Live Logid)")
+logs = load_logs()
+log_text = "".join(logs)
+st.text_area("Logi väljund:", log_text, height=400)
+
+# Automaatne värskendus (iga 30 sekundi tagant)
+time.sleep(30)
+st.rerun()

@@ -5,6 +5,7 @@ import builtins
 import re
 import requests
 import json
+import csv  # VAJALIK CSV JAOKS
 import xml.etree.ElementTree as ET
 import pandas as pd
 import ta
@@ -21,6 +22,7 @@ from openai import OpenAI
 # --- 0. SEADISTUS ---
 LOG_FILE = "bot.log"
 BRAIN_FILE = "brain.json"
+ARCHIVE_FILE = "trade_archive.csv" # PIKAAJALINE MÄLU
 
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -37,7 +39,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: Võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v22.3 (GOOGLE INTEL) ---")
+print("--- VIBE TRADER: v23 (HISTORY + GOOGLE) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -64,6 +66,40 @@ def save_brain(brain_data):
         with open(BRAIN_FILE, 'w') as f: 
             json.dump(brain_data, f, indent=4)
     except: pass
+
+# --- UUS: AJALOO SALVESTAMINE ---
+def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
+    try:
+        entry_price = float(entry_price)
+        exit_price = float(exit_price)
+        qty = float(qty)
+        
+        profit_usd = (exit_price - entry_price) * qty
+        profit_pct = ((exit_price - entry_price) / entry_price) * 100
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        file_exists = os.path.isfile(ARCHIVE_FILE)
+        
+        with open(ARCHIVE_FILE, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            # Kui fail on uus, teeme päised
+            if not file_exists:
+                writer.writerow(["Time", "Symbol", "Entry Price", "Exit Price", "Qty", "Profit USD", "Profit %", "Reason"])
+            
+            writer.writerow([
+                timestamp, 
+                symbol, 
+                round(entry_price, 4), 
+                round(exit_price, 4), 
+                round(qty, 4), 
+                round(profit_usd, 2), 
+                round(profit_pct, 2), 
+                reason
+            ])
+            
+        print(f"   📝 AJALUGU SALVESTATUD: {symbol} PnL: ${profit_usd:.2f} ({profit_pct:.2f}%)")
+    except Exception as e:
+        print(f"   ❌ Viga ajaloo salvestamisel: {e}")
 
 def update_position_metadata(symbol, atr_value):
     brain = load_brain()
@@ -133,7 +169,6 @@ def format_symbol_for_yahoo(symbol):
 
 def get_yahoo_data(symbol, period="1mo", interval="1h"):
     try:
-        # Väike paus Yahoo jaoks
         time.sleep(1.5)
         y_symbol = format_symbol_for_yahoo(symbol)
         df = yf.download(y_symbol, period=period, interval=interval, progress=False, timeout=10)
@@ -185,7 +220,6 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     if pd.isna(rsi): return 0, 0, 0, 0, 0
 
-    # --- DÜNAAMILINE SKOORIMINE ---
     score = 50
     
     if MARKET_MODE == "BULL":
@@ -214,51 +248,33 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
 # --- 3. AI & UUDISED (GOOGLE NEWS) ---
 
 def get_google_news(symbol):
-    """
-    Tõmbab Google News RSS feedi konkreetse mündi kohta.
-    See on väga täpne ja kiire viis saada infot.
-    """
     try:
-        clean_ticker = symbol.split("/")[0] # nt 'BTC'
-        # Google News RSS URL: Otsime "MÜNT crypto", viimased 24h
+        clean_ticker = symbol.split("/")[0]
         url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
+        headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=4)
         
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             news_items = []
-            # Võtame 3 esimest uudist
             for item in root.findall('.//item')[:3]:
                 title = item.find('title').text
                 pub_date = item.find('pubDate').text
                 news_items.append(f"- {title} ({pub_date})")
-            
             return "\n".join(news_items) if news_items else "Värsked uudised puuduvad."
-            
         return "Uudiste päring ebaõnnestus."
     except Exception as e:
         return f"Viga uudistes: {e}"
 
 def analyze_coin_ai(symbol):
     news_text = get_google_news(symbol)
-    
-    context = "Turg on languses (BEAR). Otsime AINULT lühiajalist põrget (scalp)." if MARKET_MODE == "BEAR" else "Turg on tõusus. Otsime head sisenemist."
+    context = "Turg on languses (BEAR)." if MARKET_MODE == "BEAR" else "Turg on tõusus."
 
     prompt = f"""
     Analüüsi krüptovaluutat {symbol}.
     Kontekst: {context}
-    
-    Viimased 24h Google News pealkirjad:
-    {news_text}
-    
-    Ülesanne: Hinda lühiajalist (24h) potentsiaali skaalal 0-100.
-    Kui uudised on negatiivsed või räägivad häkkimistest/pettusest, anna väga madal hinne.
-    
+    Uudised: {news_text}
+    Hinda lühiajalist (24h) potentsiaali skaalal 0-100.
     Vasta AINULT kujul: SKOOR: X
     """
     try:
@@ -294,7 +310,7 @@ def manage_existing_positions():
         if df is None:
             if current_price < entry_price * 0.93: 
                  print(f"   ⚠️ {symbol} PIME STOP! Hind kukkus -7%. Müün.")
-                 close_position(symbol)
+                 close_position(symbol, "BLIND_STOP")
             continue
 
         current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
@@ -337,14 +353,31 @@ def manage_existing_positions():
 
         if current_price <= final_stop:
             print(f"      !!! STOP HIT ({stop_type})! Müün {symbol}...")
-            close_position(symbol)
+            close_position(symbol, stop_type)
 
-def close_position(symbol):
+def close_position(symbol, reason="UNKNOWN"):
+    """
+    Paneb positsiooni kinni JA salvestab tulemuse CSV faili.
+    """
     try:
+        # 1. Pärime positsiooni andmed enne sulgemist
+        pos = trading_client.get_open_position(symbol)
+        qty = float(pos.qty)
+        entry_price = float(pos.avg_entry_price)
+        current_price = float(pos.current_price)
+
+        # 2. Sulgeme
         trading_client.close_position(symbol)
+        
+        # 3. Salvestame ajaloo
+        log_trade_to_csv(symbol, entry_price, current_price, qty, reason)
+        
+        # 4. Aktiveerime jahtumise
         activate_cooldown(symbol)
+        
         print(f"      TEHTUD! {symbol} müüdud.")
-    except Exception as e: print(f"Viga: {e}")
+    except Exception as e: 
+        print(f"Viga sulgemisel: {e}")
 
 def trade(symbol, score, atr):
     try: equity = float(trading_client.get_account().equity)
