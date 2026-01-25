@@ -57,7 +57,7 @@ try:
         print("CRITICAL: API võtmed puudu!")
         exit()
 
-    print("--- VIBE TRADER: v31.5 (FIXED & SECURE) ---")
+    print("--- VIBE TRADER: v32.0 (FULL AI RESTORED) ---")
 
     MARKET_MODE = "NEUTRAL" 
     trading_client = TradingClient(api_key, secret_key, paper=True)
@@ -69,7 +69,6 @@ try:
 
 except Exception as e:
     print(f"CRITICAL STARTUP ERROR: {e}")
-    # See prindib vea ka siis, kui logifail on lukus
     builtins.print(f"CRITICAL STARTUP ERROR: {e}") 
     exit()
 
@@ -193,16 +192,19 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
 
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close']).iloc[-1]
+    macd_diff = ta.trend.macd_diff(df['close']).iloc[-1]
     
     score = 50
     if MARKET_MODE == "BULL":
         if rsi < 30: score += 30
-        elif rsi < 55: score += 15 
+        elif rsi < 55: score += 15
+        if macd_diff > 0: score += 10 
     elif MARKET_MODE == "BEAR":
-        # === KONSERVATIIVNE REŽIIM ===
+        # Konservatiivne (RSI < 30)
         if rsi < 25: score += 45     
-        elif rsi < 30: score += 25  # OSTMINE AINULT < 30
+        elif rsi < 30: score += 25  
         elif rsi > 45: score -= 50   
+        if macd_diff > 0: score += 15
 
     if final_vol_usd < 10000: score = 0
     if score >= 60:
@@ -210,21 +212,135 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), atr, rsi
 
-# --- 3. UUDISED ---
-def get_news_ddg(symbol):
-    # Lihtsustatud versioon, et vähendada vigu
+# --- 3. UUDISED JA AI (TÄISMAHUS TAGASI) ---
+
+def scrape_with_trafilatura(url):
     try:
-        sleep_time = random.uniform(6, 12)
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded)
+            return text[:3000] if text else None
+    except: pass
+    return None
+
+def get_backup_news_rss(symbol):
+    try:
+        print("      ⚠️ DDG Ratelimit! Lülitun ümber Google RSS varuplaanile...")
+        clean_ticker = symbol.split("/")[0] 
+        url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
+        res = requests.get(url, timeout=5)
+        
+        full_report = []
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')[:3]
+            for item in items:
+                title = item.find('title').text
+                pub_date = item.find('pubDate').text
+                full_report.append(f"--- BACKUP SOURCE (Title Only) ---\nTITLE: {title}\nDATE: {pub_date}\n")
+            return "\n".join(full_report)
+        return "Backup news failed."
+    except Exception as e:
+        return f"Backup error: {e}"
+
+def get_news_ddg(symbol):
+    try:
+        # TEE PAUS!
+        sleep_time = random.uniform(5, 10)
         print(f"      ⏳ Uudised: ootan {sleep_time:.1f}s...")
         time.sleep(sleep_time)
-        return "News fetch temporarily simplified for stability."
-    except: return "No news."
+
+        clean_ticker = symbol.split("/")[0]
+        keywords = f"{clean_ticker} crypto news"
+        
+        results = DDGS().news(keywords=keywords, region="wt-wt", safesearch="off", max_results=3)
+        
+        full_report = []
+        if not results: return get_backup_news_rss(symbol)
+
+        for item in results:
+            title = item.get('title', 'No Title')
+            link = item.get('url', '')
+            date = item.get('date', 'Today')
+            
+            # Lihtne proovimine trafilaturaga
+            content = scrape_with_trafilatura(link)
+            if not content: content = item.get('body', 'No content')
+            
+            full_report.append(f"--- ARTICLE ---\nTITLE: {title}\nDATE: {date}\nLINK: {link}\nCONTENT:\n{content[:1500]}\n")
+                
+        return "\n".join(full_report)
+
+    except Exception as e:
+        return get_backup_news_rss(symbol)
 
 def analyze_coin_ai(symbol):
-    # Dummy fix praeguseks, et vältida hangumist
-    return 75 
+    news_text = get_news_ddg(symbol)
+    if "Backup error" in news_text or len(news_text) < 50:
+        return 50 # Neutraalne, kui uudiseid pole
+    
+    market_context = "BEAR MARKET (Trend is DOWN). Use EXTREME CAUTION." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
 
-# --- 4. HALDUS ---
+    prompt = f"""
+    You are an Elite Crypto Trader.
+    Analyze the following NEWS for {symbol} to decide on an immediate (24h) entry.
+    
+    MARKET CONTEXT: {market_context}
+    
+    === NEWS REPORT ===
+    {news_text}
+    
+    === SCORING ===
+    - 0-30: BAD NEWS. Sell.
+    - 31-49: Bearish/Weak.
+    - 50: Neutral / No real news.
+    - 51-79: Good vibes.
+    - 80-100: STRONG BUY.
+    
+    RESPONSE FORMAT (JSON):
+    {{"score": X, "reason": "Detailed reason citing specific facts"}}
+    """
+    
+    score = 50
+    reason = "Analysis failed"
+
+    try:
+        res = ai_client.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        full_response = res.choices[0].message.content
+        data = json.loads(full_response)
+        score = int(data.get("score", 50))
+        reason = data.get("reason", "No reason provided")
+    except Exception as e:
+        reason = f"Error: {e}"
+        score = 50
+
+    print(f"      🤖 AI ANALÜÜS: {score}/100 | {reason[:100]}...")
+    log_ai_prompt(symbol, prompt, f"SCORE: {score}\nREASON: {reason}")
+    return score
+
+# --- 4. HALDUS JA MÜÜK ---
+
+def close_position(symbol, reason="UNKNOWN"):
+    try:
+        pos = trading_client.get_open_position(symbol)
+        qty = float(pos.qty)
+        entry = float(pos.avg_entry_price)
+        curr = float(pos.current_price)
+        
+        # SULGE POSITSIOON
+        trading_client.close_position(symbol)
+        
+        # LOGI
+        log_trade_to_csv(symbol, entry, curr, qty, reason)
+        activate_cooldown(symbol)
+        print(f"      ✅ MÜÜDUD: {symbol} (Põhjus: {reason})")
+    except Exception as e: 
+        print(f"      ❌ Viga sulgemisel: {e}")
+
 def manage_existing_positions():
     print("1. PORTFELL...")
     try: positions = trading_client.get_all_positions()
@@ -244,9 +360,8 @@ def manage_existing_positions():
             update_high_watermark(symbol, current_price)
             hw = current_price
         
-        # BEAR MARKET STOPID ON RANGED
         stop_level = hw - (1.5 * atr) if MARKET_MODE == "BEAR" else hw - (2.5 * atr)
-        hard_stop = entry_price * 0.94 # Max 6% kaotus
+        hard_stop = entry_price * 0.94 
         
         final_stop = max(stop_level, hard_stop)
         
@@ -260,7 +375,7 @@ def trade(symbol, score, atr):
     try: equity = float(trading_client.get_account().equity)
     except: return
     if equity < 50: return
-    amount = max(round(equity * 0.04, 2), 10) # 4% equityst
+    amount = max(round(equity * 0.04, 2), 10) 
     
     print(f"5. TEGIJA: Ostame {symbol} ${amount:.2f} (Skoor {score})")
     try:
@@ -295,18 +410,32 @@ def run_cycle():
     candidates.sort(key=lambda x: x['abs_change'], reverse=True)
     
     my_pos = [p.symbol for p in trading_client.get_all_positions()]
-    
-    for i, c in enumerate(candidates[:30]): # Vaatame top 30
+    ai_calls_made = 0
+
+    for i, c in enumerate(candidates[:30]): 
         s = c['symbol']
         if s in my_pos or not is_cooled_down(s) or c['vol_usd'] < 10000: continue
         
         print(f"   Kontrollin: {s}...")
         tech_score, atr, rsi = get_technical_analysis(s, c['vol_usd'])
         
-        if tech_score > 60:
-            print(f"   🔥 LEID: {s}. Ostame!")
-            trade(s, tech_score, atr)
-            break # Ostame ainult ühe korraga
+        if tech_score > 55:
+            if ai_calls_made >= MAX_AI_CALLS:
+                 print("   ⚠️ AI limiit.")
+                 break
+            
+            print(f"   🔥 LEID: {s}. Küsin AI arvamust...")
+            ai_score = analyze_coin_ai(s)
+            ai_calls_made += 1
+            
+            # KOMBINEERITUD SKOOR (60% Tech, 40% AI)
+            final_score = (tech_score * 0.6) + (ai_score * 0.4)
+            print(f"      🏁 LÕPPHINNE: {final_score:.1f}")
+
+            if final_score > 75:
+                print(f"   🚀 OSTMINE: {s}")
+                trade(s, final_score, atr)
+                break 
 
     print(f"========== TSÜKKEL LÕPP ==========")
 
@@ -315,3 +444,4 @@ if __name__ == "__main__":
         run_cycle()
     except Exception as e:
         print(f"CRITICAL RUN ERROR: {e}")
+        print(traceback.format_exc())
