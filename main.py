@@ -5,7 +5,7 @@ import builtins
 import re
 import requests
 import json
-import csv  # VAJALIK CSV JAOKS
+import csv
 import xml.etree.ElementTree as ET
 import pandas as pd
 import ta
@@ -19,10 +19,11 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 
-# --- 0. SEADISTUS ---
+# --- 0. SEADISTUS JA FAILID ---
 LOG_FILE = "bot.log"
 BRAIN_FILE = "brain.json"
-ARCHIVE_FILE = "trade_archive.csv" # PIKAAJALINE MÄLU
+ARCHIVE_FILE = "trade_archive.csv" # Exceli jaoks
+AI_LOG_FILE = "ai_history.log"     # Prompt Engineeringi jaoks
 
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -36,10 +37,10 @@ secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key or not secret_key or not openai_key:
-    print("VIGA: Võtmed puudu!")
+    print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v23 (HISTORY + GOOGLE) ---")
+print("--- VIBE TRADER: v25 (FULL AI LOGGING & MEMORY) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -52,7 +53,7 @@ ai_client = OpenAI(api_key=openai_key)
 MIN_VOLUME_USD = 10000     
 MAX_AI_CALLS = 10          
 
-# --- 1. MÄLU JA ABI ---
+# --- 1. MÄLU JA AJALUGU ---
 
 def load_brain():
     if os.path.exists(BRAIN_FILE):
@@ -67,8 +68,10 @@ def save_brain(brain_data):
             json.dump(brain_data, f, indent=4)
     except: pass
 
-# --- UUS: AJALOO SALVESTAMINE ---
 def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
+    """
+    Salvestab tehingu püsivasse CSV arhiivi.
+    """
     try:
         entry_price = float(entry_price)
         exit_price = float(exit_price)
@@ -82,7 +85,7 @@ def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
         
         with open(ARCHIVE_FILE, mode='a', newline='') as f:
             writer = csv.writer(f)
-            # Kui fail on uus, teeme päised
+            # Päis, kui fail on uus
             if not file_exists:
                 writer.writerow(["Time", "Symbol", "Entry Price", "Exit Price", "Qty", "Profit USD", "Profit %", "Reason"])
             
@@ -99,7 +102,23 @@ def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
             
         print(f"   📝 AJALUGU SALVESTATUD: {symbol} PnL: ${profit_usd:.2f} ({profit_pct:.2f}%)")
     except Exception as e:
-        print(f"   ❌ Viga ajaloo salvestamisel: {e}")
+        print(f"   ❌ Viga CSV salvestamisel: {e}")
+
+def log_ai_prompt(symbol, prompt_text, response_text):
+    """
+    Salvestab AI päringu ja vastuse eraldi faili, et saaksime hiljem prompti tuunida.
+    """
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(AI_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] 🧠 ANALÜÜS: {symbol}\n")
+            f.write("👇 --- SAADETUD PROMPT (SISEND) ---\n")
+            f.write(prompt_text.strip() + "\n")
+            f.write("👆 --- AI VASTUS (TULEMUS) ---\n")
+            f.write(response_text.strip() + "\n")
+            f.write("="*60 + "\n\n")
+    except Exception as e:
+        print(f"Viga AI logimisel: {e}")
 
 def update_position_metadata(symbol, atr_value):
     brain = load_brain()
@@ -154,7 +173,7 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS ---
+# --- 2. ANDMETÖÖTLUS JA ANALÜÜS ---
 
 def format_symbol_for_yahoo(symbol):
     s = symbol.replace("/", "")
@@ -221,20 +240,16 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     if pd.isna(rsi): return 0, 0, 0, 0, 0
 
     score = 50
-    
     if MARKET_MODE == "BULL":
         if rsi < 30: score += 30
         elif rsi < 55: score += 15 
-        
         if macd_diff > 0: score += 10
         if adx > 25: score += 10
-
     elif MARKET_MODE == "BEAR":
         if rsi < 25: score += 45     
         elif rsi < 35: score += 25   
         elif rsi < 40: score += 10   
         elif rsi > 45: score -= 50   
-        
         if final_vol_usd > 1000000: score += 10
         if macd_diff > 0: score += 15 
 
@@ -245,15 +260,14 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (GOOGLE NEWS) ---
+# --- 3. AI & UUDISED (INTELLIGENCE) ---
 
 def get_google_news(symbol):
     try:
-        clean_ticker = symbol.split("/")[0]
+        clean_ticker = symbol.split("/")[0] 
         url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=4)
-        
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             news_items = []
@@ -268,25 +282,43 @@ def get_google_news(symbol):
 
 def analyze_coin_ai(symbol):
     news_text = get_google_news(symbol)
-    context = "Turg on languses (BEAR)." if MARKET_MODE == "BEAR" else "Turg on tõusus."
+    context = "Turg on languses (BEAR). Otsime AINULT lühiajalist põrget (scalp)." if MARKET_MODE == "BEAR" else "Turg on tõusus. Otsime head sisenemist."
 
     prompt = f"""
     Analüüsi krüptovaluutat {symbol}.
     Kontekst: {context}
-    Uudised: {news_text}
-    Hinda lühiajalist (24h) potentsiaali skaalal 0-100.
+    
+    Viimased 24h Google News pealkirjad:
+    {news_text}
+    
+    Ülesanne: Hinda lühiajalist (24h) potentsiaali skaalal 0-100.
+    Kui uudised on negatiivsed (häkkimine, SEC, kohtuasi, delisting), anna kohe hinne alla 20.
+    Kui uudised on vanad või ebaolulised, anna neutraalne 50.
+    
     Vasta AINULT kujul: SKOOR: X
     """
+    
+    response_content = ""
+    score = 50
+
     try:
         res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-        match = re.search(r'SKOOR:\s*(\d+)', res.choices[0].message.content)
+        response_content = res.choices[0].message.content
+        
+        match = re.search(r'SKOOR:\s*(\d+)', response_content)
         score = int(match.group(1)) if match else 50
-    except: score = 50
+    except Exception as e:
+        response_content = f"VIGA: {e}"
+        score = 50
 
     print(f"      🤖 AI HINNE (Google News): {score}/100")
+    
+    # SALVESTAME MÄLUFAILI ANALÜÜSIKS
+    log_ai_prompt(symbol, prompt, response_content)
+    
     return score
 
-# --- 4. HALDUS ---
+# --- 4. HALDUS JA OSTMINE ---
 
 def manage_existing_positions():
     print("1. PORTFELL: Risk-Free & Profit Lock...")
@@ -348,7 +380,6 @@ def manage_existing_positions():
             stop_type = "HARD 🛑"
             
         dist_to_stop = ((current_price - final_stop) / current_price) * 100
-        
         print(f"   -> {symbol}: {profit_pct:.2f}% (RSI:{current_rsi:.0f} | Stop: ${final_stop:.2f} | {stop_type} | Puhver: {dist_to_stop:.2f}%)")
 
         if current_price <= final_stop:
@@ -356,25 +387,18 @@ def manage_existing_positions():
             close_position(symbol, stop_type)
 
 def close_position(symbol, reason="UNKNOWN"):
-    """
-    Paneb positsiooni kinni JA salvestab tulemuse CSV faili.
-    """
     try:
-        # 1. Pärime positsiooni andmed enne sulgemist
         pos = trading_client.get_open_position(symbol)
         qty = float(pos.qty)
         entry_price = float(pos.avg_entry_price)
         current_price = float(pos.current_price)
 
-        # 2. Sulgeme
         trading_client.close_position(symbol)
         
-        # 3. Salvestame ajaloo
+        # Salvestame CSV arhiivi ja JSON lühimällu
         log_trade_to_csv(symbol, entry_price, current_price, qty, reason)
         
-        # 4. Aktiveerime jahtumise
         activate_cooldown(symbol)
-        
         print(f"      TEHTUD! {symbol} müüdud.")
     except Exception as e: 
         print(f"Viga sulgemisel: {e}")
@@ -400,7 +424,6 @@ def trade(symbol, score, atr):
 
 def run_cycle():
     print(f"========== TSÜKKEL START ==========") 
-    
     determine_market_mode()
     manage_existing_positions()
     
