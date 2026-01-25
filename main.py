@@ -40,7 +40,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v26 (HEDGE FUND EDITION) ---")
+print("--- VIBE TRADER: v26.1 (LOOP FIX) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -464,5 +464,13 @@ def run_cycle():
     
     print(f"========== TSÜKKEL LÕPP ==========")
 
+# --- LÕPMATU TSÜKKEL ---
 if __name__ == "__main__":
-    run_cycle()
+    while True:
+        try:
+            run_cycle()
+        except Exception as e:
+            print(f"CRITICAL ERROR: {e}")
+        
+        print("💤 Ootan 15 minutit järgmise tsüklini...")
+        time.sleep(900) # 15 minutit pausi
