@@ -6,9 +6,10 @@ import time
 # --- SEADISTUS ---
 CSV_FILE = "trade_archive.csv"
 LOG_FILE = "bot.log"
+AI_LOG_FILE = "ai_history.log"
 PAGE_TITLE = "🤖 Vibe Trader Live Dashboard"
 
-# Lehe seadistus (lai vaade)
+# Lehe seadistus
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
 # --- FUNKTSIOONID ---
@@ -31,9 +32,18 @@ def load_logs():
     try:
         with open(LOG_FILE, "r") as f:
             lines = f.readlines()
-        return lines[-100:][::-1] # Viimased 100 rida, tagurpidi
+        return lines[-100:][::-1] # Viimased 100 rida
     except:
         return ["Viga logide lugemisel."]
+
+def load_ai_logs():
+    """Loeb AI mõttekäigu logi"""
+    if not os.path.exists(AI_LOG_FILE):
+        return "AI pole veel ühtegi analüüsi teinud või fail puudub."
+    try:
+        with open(AI_LOG_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    except: return "Viga AI logi lugemisel."
 
 # --- LEHE SISU ---
 
@@ -44,7 +54,7 @@ st.markdown("---")
 if st.button('🔄 Värskenda andmeid'):
     st.rerun()
 
-# 1. STATISTIKA ARVUTAMINE
+# 1. STATISTIKA
 df = load_data()
 
 col1, col2, col3, col4 = st.columns(4)
@@ -58,48 +68,41 @@ if not df.empty:
     
     last_trade = df.iloc[-1]
     
-    # KUVAME MEETRIKAD
-    col1.metric("💰 Kogukasum (PnL)", f"${total_profit:.2f}", delta_color="normal")
+    col1.metric("💰 Kogukasum", f"${total_profit:.2f}")
     col2.metric("🎯 Võiduprotsent", f"{win_rate:.1f}%", f"{win_count}W / {loss_count}L")
     col3.metric("📊 Tehingute arv", f"{total_trades}")
-    
-    last_pnl = last_trade['Profit USD']
-    last_color = "normal" if last_pnl == 0 else "off" # Streamlit hack värvideks
-    col4.metric(
-        "⏱ Viimane tehing", 
-        f"{last_trade['Symbol']}", 
-        f"${last_pnl:.2f} ({last_trade['Reason']})"
-    )
+    col4.metric("⏱ Viimane tehing", f"{last_trade['Symbol']}", f"${last_trade['Profit USD']:.2f}")
     
     # 2. GRAAFIKUD
-    st.subheader("📈 Kasumikõver (Equity Curve)")
-    
-    # Arvutame jooksva kasumi
+    st.subheader("📈 Kasumikõver")
     df = df.sort_values(by='Time')
     df['Cumulative Profit'] = df['Profit USD'].cumsum()
-    
     st.line_chart(df, x='Time', y='Cumulative Profit')
     
     # 3. TABEL
     with st.expander("📂 Vaata tehingute ajalugu (Detailid)"):
-        st.dataframe(df.sort_values(by='Time', ascending=False).style.format({
-            'Profit USD': '${:.2f}',
-            'Profit %': '{:.2f}%',
-            'Entry Price': '${:.4f}',
-            'Exit Price': '${:.4f}'
-        }))
+        st.dataframe(df.sort_values(by='Time', ascending=False).style.format({'Profit USD': '${:.2f}'}))
 
 else:
-    st.warning("📭 Ajalugu on tühi. Oota esimest tehingut (müüki).")
+    st.warning("📭 Ajalugu on tühi. Oota esimest tehingut.")
 
 st.markdown("---")
 
-# 4. LIVE LOGID
-st.subheader("📟 Boti Aju (Live Logid)")
+# --- UUS: AI MÕTTEKÄIK ---
+st.subheader("🧠 Tehisintellekti Aju")
+with st.expander("Vaata, mida AI tegelikult mõtles (Prompt & Vastus)"):
+    ai_logs = load_ai_logs()
+    # Näitame viimast 10000 tähemärki, et pilti mitte umbe ajada
+    st.text_area("AI Logi:", ai_logs[-10000:], height=400)
+
+st.markdown("---")
+
+# 4. TAVALISED LOGID
+st.subheader("📟 Süsteemi Logid")
 logs = load_logs()
 log_text = "".join(logs)
-st.text_area("Logi väljund:", log_text, height=400)
+st.text_area("Logi väljund:", log_text, height=300)
 
-# Automaatne värskendus (iga 30 sekundi tagant)
+# Automaatne värskendus
 time.sleep(30)
 st.rerun()
