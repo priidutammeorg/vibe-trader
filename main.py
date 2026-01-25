@@ -22,34 +22,33 @@ from openai import OpenAI
 import trafilatura
 from ddgs import DDGS
 
-# --- 0. SEADISTUS JA FAILID ---
+# --- 0. SEADISTUS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 LOG_FILE = os.path.join(BASE_DIR, "bot.log")
 BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
 AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")     
 
-# --- LOGIMISE FUNKTSIOON (FIXED) ---
+# --- LOGIMINE (AINULT ÜKS KORD) ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     kwargs.pop('flush', None)
     msg = " ".join(map(str, args))
     formatted_msg = f"[{now}] {msg}"
     
-    # 1. KIRJUTA FAIL (See on peamine)
+    # 1. Kirjuta faili (Alati)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(formatted_msg + "\n")
     except Exception as e:
-        builtins.print(f"[SYSTEM ERROR] Logi viga: {e}")
+        builtins.print(f"Log Error: {e}")
 
-    # 2. PRINDI EKRAANILET AINULT KUI EI OLE CRON
-    # See väldib topeltkirjeid logis, kui cron on valesti seadistatud
+    # 2. Prindi ekraanile (Ainult kui inimene vaatab)
+    # See takistab Cronil topeltkirjete tegemist
     if sys.stdout.isatty():
         builtins.print(formatted_msg, flush=True, **kwargs)
 
-# --- CRASH CATCHER ---
+# --- STARTUP CHECK ---
 try:
     load_dotenv(os.path.join(BASE_DIR, ".env"))
     api_key = os.getenv("ALPACA_API_KEY")
@@ -72,7 +71,7 @@ except Exception as e:
     print(f"CRITICAL STARTUP ERROR: {e}")
     exit()
 
-# --- 1. MÄLU JA HALDUS ---
+# --- 1. MÄLU JA ABIFUNKTSIOONID ---
 def load_brain():
     if os.path.exists(BRAIN_FILE):
         try:
@@ -113,23 +112,16 @@ def update_position_metadata(symbol, atr_value):
         brain["positions"][symbol] = {"highest_price": 0, "atr_at_entry": atr_value, "is_risk_free": False}
     save_brain(brain)
 
-def update_high_watermark(symbol, current_price, current_rsi=50):
+def update_high_watermark(symbol, current_price):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     if symbol not in brain["positions"]:
-        brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05, "is_risk_free": False, "last_rsi": current_rsi}
+        brain["positions"][symbol] = {"highest_price": current_price, "atr_at_entry": current_price * 0.05, "is_risk_free": False}
     else:
-        brain["positions"][symbol]["last_rsi"] = current_rsi
         if current_price > brain["positions"][symbol]["highest_price"]:
             brain["positions"][symbol]["highest_price"] = current_price
             save_brain(brain)
     save_brain(brain)
-
-def set_risk_free_status(symbol):
-    brain = load_brain()
-    if "positions" in brain and symbol in brain["positions"]:
-        brain["positions"][symbol]["is_risk_free"] = True
-        save_brain(brain)
 
 def get_position_data(symbol):
     brain = load_brain()
@@ -200,7 +192,7 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
         elif rsi < 55: score += 15
         if macd_diff > 0: score += 10 
     elif MARKET_MODE == "BEAR":
-        # RSI < 30 STRATEEGIA
+        # RSI < 30 (Sügav põhi)
         if rsi < 25: score += 45     
         elif rsi < 30: score += 25  
         elif rsi > 45: score -= 50   
@@ -212,14 +204,11 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), atr, rsi
 
-# --- 3. UUDISED JA AI ---
-
+# --- 3. AI & UUDISED ---
 def scrape_with_trafilatura(url):
     try:
         downloaded = trafilatura.fetch_url(url)
-        if downloaded:
-            text = trafilatura.extract(downloaded)
-            return text[:3000] if text else None
+        if downloaded: return trafilatura.extract(downloaded)[:3000]
     except: pass
     return None
 
@@ -264,11 +253,8 @@ def get_news_ddg(symbol):
             
             content = scrape_with_trafilatura(link)
             if not content: content = item.get('body', 'No content')
-            
             full_report.append(f"--- ARTICLE ---\nTITLE: {title}\nDATE: {date}\nLINK: {link}\nCONTENT:\n{content[:1500]}\n")
-                
         return "\n".join(full_report)
-
     except Exception as e:
         return get_backup_news_rss(symbol)
 
@@ -278,49 +264,40 @@ def analyze_coin_ai(symbol):
         return 50 
     
     market_context = "BEAR MARKET (Trend is DOWN). Use EXTREME CAUTION." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
-
     prompt = f"""
     You are an Elite Crypto Trader.
     Analyze the following NEWS for {symbol} to decide on an immediate (24h) entry.
-    
     MARKET CONTEXT: {market_context}
-    
     === NEWS REPORT ===
     {news_text}
-    
     === SCORING ===
     - 0-30: BAD NEWS. Sell.
     - 31-49: Bearish/Weak.
     - 50: Neutral / No real news.
     - 51-79: Good vibes.
     - 80-100: STRONG BUY.
-    
     RESPONSE FORMAT (JSON):
     {{"score": X, "reason": "Detailed reason citing specific facts"}}
     """
-    
     score = 50
     reason = "Analysis failed"
-
     try:
         res = ai_client.chat.completions.create(
             model="gpt-4o-mini", 
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
-        full_response = res.choices[0].message.content
-        data = json.loads(full_response)
+        data = json.loads(res.choices[0].message.content)
         score = int(data.get("score", 50))
         reason = data.get("reason", "No reason provided")
     except Exception as e:
         reason = f"Error: {e}"
-        score = 50
-
+    
     print(f"      🤖 AI ANALÜÜS: {score}/100 | {reason[:100]}...")
     log_ai_prompt(symbol, prompt, f"SCORE: {score}\nREASON: {reason}")
     return score
 
-# --- 4. HALDUS JA MÜÜK ---
+# --- 4. HALDUS JA TEHINGUD ---
 
 def close_position(symbol, reason="UNKNOWN"):
     try:
@@ -328,7 +305,6 @@ def close_position(symbol, reason="UNKNOWN"):
         qty = float(pos.qty)
         entry = float(pos.avg_entry_price)
         curr = float(pos.current_price)
-        
         trading_client.close_position(symbol)
         log_trade_to_csv(symbol, entry, curr, qty, reason)
         activate_cooldown(symbol)
@@ -355,9 +331,9 @@ def manage_existing_positions():
             update_high_watermark(symbol, current_price)
             hw = current_price
         
+        # STOP-LOSS LOOGIKA
         stop_level = hw - (1.5 * atr) if MARKET_MODE == "BEAR" else hw - (2.5 * atr)
         hard_stop = entry_price * 0.94 
-        
         final_stop = max(stop_level, hard_stop)
         
         print(f"   -> {symbol}: {profit_pct:.2f}% (Stop: ${final_stop:.2f})")
@@ -382,19 +358,14 @@ def trade(symbol, score, atr):
         print(f"   -> Viga ostul: {e}")
 
 def run_cycle():
-    # --- VERSIOON JA ALGUS (ALATI NÄHTAV) ---
     print("="*40)
-    print("--- VIBE TRADER: v32.2 (CLEAN LOGS & PROFIT) ---")
+    print("--- VIBE TRADER: v33.0 (STABLE) ---")
     print(f"=== TSÜKKEL START: {datetime.now()} ===")
     
-    # --- UUS: KONTO SEIS ---
     try:
         acct = trading_client.get_account()
-        equity = float(acct.equity)
-        cash = float(acct.cash)
-        print(f"1. KONTO SEIS: Equity ${equity:,.2f} | Cash ${cash:,.2f}")
-    except:
-        print("1. KONTO SEIS: Info kättesaamatu")
+        print(f"1. KONTO: Equity ${float(acct.equity):,.2f} | Cash ${float(acct.cash):,.2f}")
+    except: print("1. KONTO: Info puudub")
 
     determine_market_mode()
     manage_existing_positions()
