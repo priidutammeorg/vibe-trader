@@ -18,13 +18,16 @@ from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
-import trafilatura # UUS: Moodne skreipija
+import trafilatura 
 
-# --- 0. SEADISTUS JA FAILID ---
-LOG_FILE = "bot.log"
-BRAIN_FILE = "brain.json"
-ARCHIVE_FILE = "trade_archive.csv" 
-AI_LOG_FILE = "ai_history.log"     
+# --- 0. SEADISTUS JA FAILID (FIX: ABSOLUUTSED TEEKONNAD) ---
+# See rida leiab üles, kus main.py tegelikult asub (/root/vibe-trader)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+LOG_FILE = os.path.join(BASE_DIR, "bot.log")
+BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
+ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
+AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")     
 
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -32,7 +35,9 @@ def print(*args, **kwargs):
     msg = " ".join(map(str, args))
     builtins.print(f"[{now}] {msg}", **kwargs)
 
-load_dotenv()
+# Laeme .env faili kindlasti õigest kaustast
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
@@ -41,7 +46,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v29 (TRAFILATURA SMART READER) ---")
+print("--- VIBE TRADER: v29.1 (ABSOLUTE PATHS FIX) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -91,6 +96,7 @@ def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
 def log_ai_prompt(symbol, prompt_text, response_text):
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Nüüd kirjutame kindlasti õigesse kohta (BASE_DIR)
         with open(AI_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] 🧠 ANALÜÜS: {symbol}\n")
             f.write("👇 --- INPUT (PROMPT & ARTICLES) ---\n")
