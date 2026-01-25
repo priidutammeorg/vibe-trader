@@ -22,7 +22,7 @@ from openai import OpenAI
 import trafilatura
 from ddgs import DDGS
 
-# --- 0. SEADISTUS JA FAILID (ABSOLUUTSED TEEKONNAD) ---
+# --- 0. SEADISTUS JA FAILID ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 LOG_FILE = os.path.join(BASE_DIR, "bot.log")
@@ -30,26 +30,26 @@ BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
 AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")     
 
-# --- LOGIMISE FUNKTSIOON (PARANDATUD: APPEND) ---
+# --- LOGIMISE FUNKTSIOON (SMART LOGGER: NO ECHO) ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Eemaldame flush argumendi, et see ei segaks faili kirjutamist
     kwargs.pop('flush', None)
     
     msg = " ".join(map(str, args))
     formatted_msg = f"[{now}] {msg}"
     
-    # 1. Prindi ekraanile (süsteemi logi jaoks)
-    builtins.print(formatted_msg, flush=True, **kwargs)
-    
-    # 2. KIRJUTA LOGIFAILI (Mode 'a' = Append / Lisa lõppu)
+    # 1. KIRJUTA LOGIFAILI (See on peamine mälu)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(formatted_msg + "\n")
     except Exception as e:
-        builtins.print(f"[SYSTEM ERROR] Logi salvestamine ebaõnnestus: {e}")
+        builtins.print(f"[SYSTEM ERROR] Logi viga: {e}")
 
-# Laeme .env faili kindlasti õigest kaustast
+    # 2. PRINDI EKRAANILET AINULT SIIS, KUI ON INIMENE (TERMINAL)
+    # See väldib topelt-logimist Crontabis
+    if sys.stdout.isatty():
+        builtins.print(formatted_msg, flush=True, **kwargs)
+
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 api_key = os.getenv("ALPACA_API_KEY")
@@ -57,10 +57,13 @@ secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key or not secret_key or not openai_key:
-    print("VIGA: .env failist on võtmed puudu!")
+    # Siin kasutame builtins.print otse, sest logi pole veel laetud
+    builtins.print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v31.1 (HYBRID STEALTH + LOG FIX) ---")
+# Kasutame builtins.print siin sunniviisiliselt, et näeksid versiooni käivitamisel
+if sys.stdout.isatty():
+    builtins.print(f"--- VIBE TRADER: v31.2 (SMART LOGGER FIX) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -257,9 +260,6 @@ def scrape_with_trafilatura(url):
     return None
 
 def get_backup_news_rss(symbol):
-    """
-    VARUPLAAN: Kui DuckDuckGo viskab 202 errori, kasutame vana head Google RSS-i.
-    """
     try:
         print("      ⚠️ DDG Ratelimit! Lülitun ümber Google RSS varuplaanile...")
         clean_ticker = symbol.split("/")[0] 
@@ -273,7 +273,6 @@ def get_backup_news_rss(symbol):
             for item in items:
                 title = item.find('title').text
                 pub_date = item.find('pubDate').text
-                # Google RSS puhul me sisu hästi kätte ei saa (cookie wall), aga pealkiri on parem kui mitte midagi!
                 full_report.append(f"--- BACKUP SOURCE (Title Only) ---\nTITLE: {title}\nDATE: {pub_date}\n")
             return "\n".join(full_report)
         return "Backup news failed."
@@ -282,7 +281,7 @@ def get_backup_news_rss(symbol):
 
 def get_news_ddg(symbol):
     try:
-        # TEE PAUS! See hoiab meid "limit" alt väljas.
+        # TEE PAUS!
         sleep_time = random.uniform(6, 12)
         print(f"      ⏳ Ootan {sleep_time:.1f}s, et mitte saada blokki...")
         time.sleep(sleep_time)
@@ -290,12 +289,10 @@ def get_news_ddg(symbol):
         clean_ticker = symbol.split("/")[0]
         keywords = f"{clean_ticker} crypto news"
         
-        # Kasutame DDGS
         results = DDGS().news(keywords=keywords, region="wt-wt", safesearch="off", max_results=3)
         
         full_report = []
         
-        # Kui DDG ei leia midagi või viskab vea, on tulemus tühi
         if not results:
              return get_backup_news_rss(symbol)
 
@@ -303,7 +300,6 @@ def get_news_ddg(symbol):
             title = item.get('title', 'No Title')
             link = item.get('url', '')
             date = item.get('date', 'Today')
-            
             content = scrape_with_trafilatura(link)
             
             if content:
@@ -315,7 +311,6 @@ def get_news_ddg(symbol):
         return "\n".join(full_report)
 
     except Exception as e:
-        # PÜÜAME DDG VEA KINNI ja käivitame varuplaani
         return get_backup_news_rss(symbol)
 
 def analyze_coin_ai(symbol):
