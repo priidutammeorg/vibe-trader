@@ -22,8 +22,8 @@ from openai import OpenAI
 # --- 0. SEADISTUS JA FAILID ---
 LOG_FILE = "bot.log"
 BRAIN_FILE = "brain.json"
-ARCHIVE_FILE = "trade_archive.csv" # Exceli jaoks
-AI_LOG_FILE = "ai_history.log"     # Prompt Engineeringi jaoks
+ARCHIVE_FILE = "trade_archive.csv" 
+AI_LOG_FILE = "ai_history.log"     
 
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -40,7 +40,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v25 (FULL AI LOGGING & MEMORY) ---")
+print("--- VIBE TRADER: v26 (HEDGE FUND EDITION) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -53,7 +53,7 @@ ai_client = OpenAI(api_key=openai_key)
 MIN_VOLUME_USD = 10000     
 MAX_AI_CALLS = 10          
 
-# --- 1. MÄLU JA AJALUGU ---
+# --- 1. MÄLU JA LOGIMINE ---
 
 def load_brain():
     if os.path.exists(BRAIN_FILE):
@@ -69,52 +69,32 @@ def save_brain(brain_data):
     except: pass
 
 def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
-    """
-    Salvestab tehingu püsivasse CSV arhiivi.
-    """
     try:
         entry_price = float(entry_price)
         exit_price = float(exit_price)
         qty = float(qty)
-        
         profit_usd = (exit_price - entry_price) * qty
         profit_pct = ((exit_price - entry_price) / entry_price) * 100
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         file_exists = os.path.isfile(ARCHIVE_FILE)
-        
         with open(ARCHIVE_FILE, mode='a', newline='') as f:
             writer = csv.writer(f)
-            # Päis, kui fail on uus
             if not file_exists:
                 writer.writerow(["Time", "Symbol", "Entry Price", "Exit Price", "Qty", "Profit USD", "Profit %", "Reason"])
-            
-            writer.writerow([
-                timestamp, 
-                symbol, 
-                round(entry_price, 4), 
-                round(exit_price, 4), 
-                round(qty, 4), 
-                round(profit_usd, 2), 
-                round(profit_pct, 2), 
-                reason
-            ])
-            
+            writer.writerow([timestamp, symbol, round(entry_price, 4), round(exit_price, 4), round(qty, 4), round(profit_usd, 2), round(profit_pct, 2), reason])
         print(f"   📝 AJALUGU SALVESTATUD: {symbol} PnL: ${profit_usd:.2f} ({profit_pct:.2f}%)")
     except Exception as e:
         print(f"   ❌ Viga CSV salvestamisel: {e}")
 
 def log_ai_prompt(symbol, prompt_text, response_text):
-    """
-    Salvestab AI päringu ja vastuse eraldi faili, et saaksime hiljem prompti tuunida.
-    """
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(AI_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] 🧠 ANALÜÜS: {symbol}\n")
-            f.write("👇 --- SAADETUD PROMPT (SISEND) ---\n")
+            f.write("👇 --- INPUT (PROMPT) ---\n")
             f.write(prompt_text.strip() + "\n")
-            f.write("👆 --- AI VASTUS (TULEMUS) ---\n")
+            f.write("👆 --- OUTPUT (AI DECISION) ---\n")
             f.write(response_text.strip() + "\n")
             f.write("="*60 + "\n\n")
     except Exception as e:
@@ -124,12 +104,7 @@ def update_position_metadata(symbol, atr_value):
     brain = load_brain()
     if "positions" not in brain: brain["positions"] = {}
     if symbol not in brain["positions"]:
-        brain["positions"][symbol] = {
-            "highest_price": 0, 
-            "atr_at_entry": atr_value, 
-            "is_risk_free": False,
-            "entry_mode": MARKET_MODE
-        }
+        brain["positions"][symbol] = {"highest_price": 0, "atr_at_entry": atr_value, "is_risk_free": False}
     save_brain(brain)
 
 def update_high_watermark(symbol, current_price, current_rsi=50):
@@ -159,10 +134,8 @@ def get_position_data(symbol):
 def is_cooled_down(symbol):
     brain = load_brain()
     last_sold = brain.get("cool_down", {}).get(symbol)
-    cooldown_time = 6 
-    if last_sold:
-        if datetime.now() - datetime.fromtimestamp(last_sold) < timedelta(hours=cooldown_time):
-            return False
+    if last_sold and datetime.now() - datetime.fromtimestamp(last_sold) < timedelta(hours=6):
+        return False
     return True
 
 def activate_cooldown(symbol):
@@ -173,7 +146,7 @@ def activate_cooldown(symbol):
         del brain["positions"][symbol]
     save_brain(brain)
 
-# --- 2. ANDMETÖÖTLUS JA ANALÜÜS ---
+# --- 2. TEHNILINE ANALÜÜS ---
 
 def format_symbol_for_yahoo(symbol):
     s = symbol.replace("/", "")
@@ -191,7 +164,6 @@ def get_yahoo_data(symbol, period="1mo", interval="1h"):
         time.sleep(1.5)
         y_symbol = format_symbol_for_yahoo(symbol)
         df = yf.download(y_symbol, period=period, interval=interval, progress=False, timeout=10)
-        
         if df is None or df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower() for c in df.columns]
@@ -203,15 +175,11 @@ def determine_market_mode():
     global MARKET_MODE
     print("🔍 Analüüsin turu režiimi (BTC)...")
     df = get_yahoo_data("BTC/USD", period="6mo", interval="1d")
-    
     if df is None or len(df) < 50:
-        print("   ⚠️ BTC andmed puuduvad. Jään NEUTRAL.")
         MARKET_MODE = "NEUTRAL"
         return
-        
     current_price = df['close'].iloc[-1]
     sma50 = ta.trend.sma_indicator(df['close'], window=50).iloc[-1]
-    
     if pd.isna(sma50): sma50 = current_price
 
     if current_price > sma50:
@@ -223,7 +191,6 @@ def determine_market_mode():
 
 def get_technical_analysis(symbol, alpaca_volume_usd):
     df = get_yahoo_data(symbol, period="1mo", interval="1h")
-    
     if df is None or len(df) < 30: return 0, 0, 0, 0, 0 
     
     current_price = df['close'].iloc[-1]
@@ -231,7 +198,6 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     final_vol_usd = max(alpaca_volume_usd, yahoo_vol_usd)
 
     hourly_change = ((current_price - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
-    
     rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
     macd_diff = ta.trend.macd_diff(df['close']).iloc[-1]
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
@@ -254,68 +220,84 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
         if macd_diff > 0: score += 15 
 
     if final_vol_usd < 10000: score = 0
-
     if score >= 60:
         print(f"      📊 {symbol} ({MARKET_MODE}): RSI={rsi:.1f}, Vol=${final_vol_usd/1000:.0f}k. Skoor: {score}")
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (INTELLIGENCE) ---
+# --- 3. AI & UUDISED (HEDGE FUND INTELLIGENCE) ---
 
 def get_google_news(symbol):
     try:
         clean_ticker = symbol.split("/")[0] 
         url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=4)
+        res = requests.get(url, headers=headers, timeout=5)
+        
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             news_items = []
-            for item in root.findall('.//item')[:3]:
+            for item in root.findall('.//item')[:5]:
                 title = item.find('title').text
+                raw_desc = item.find('description').text if item.find('description') is not None else ""
+                clean_desc = re.sub('<[^<]+?>', '', raw_desc)
                 pub_date = item.find('pubDate').text
-                news_items.append(f"- {title} ({pub_date})")
-            return "\n".join(news_items) if news_items else "Värsked uudised puuduvad."
-        return "Uudiste päring ebaõnnestus."
+                news_items.append(f"TITLE: {title}\nSUMMARY: {clean_desc[:300]}...\nDATE: {pub_date}\n---")
+            return "\n".join(news_items) if news_items else "No significant news found."
+        return "News fetch error."
     except Exception as e:
-        return f"Viga uudistes: {e}"
+        return f"Error fetching news: {e}"
 
 def analyze_coin_ai(symbol):
     news_text = get_google_news(symbol)
-    context = "Turg on languses (BEAR). Otsime AINULT lühiajalist põrget (scalp)." if MARKET_MODE == "BEAR" else "Turg on tõusus. Otsime head sisenemist."
+    market_context = "BEAR MARKET (Trend is DOWN). Look for CATALYSTS." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
 
     prompt = f"""
-    Analüüsi krüptovaluutat {symbol}.
-    Kontekst: {context}
+    You are a Senior Crypto Analyst at a Wall Street Hedge Fund.
+    Analyze News Sentiment for {symbol} regarding Immediate (24h) Price Action.
     
-    Viimased 24h Google News pealkirjad:
+    MARKET CONTEXT: {market_context}
+    
+    LATEST NEWS (RSS):
     {news_text}
     
-    Ülesanne: Hinda lühiajalist (24h) potentsiaali skaalal 0-100.
-    Kui uudised on negatiivsed (häkkimine, SEC, kohtuasi, delisting), anna kohe hinne alla 20.
-    Kui uudised on vanad või ebaolulised, anna neutraalne 50.
+    INSTRUCTIONS:
+    1. IGNORE "Opinion Pieces" (e.g., "Price Prediction 2030"). These are NOISE. Score them 50.
+    2. LOOK FOR "CATALYSTS":
+       - ETF Filings/Approvals, Partnerships, Exchange Listings (BULLISH -> Score 75-100).
+       - Hacks, Lawsuits, SEC, Delistings (BEARISH -> Score 0-20).
     
-    Vasta AINULT kujul: SKOOR: X
+    SCORING (0-100):
+    - 0-30: Bad news/FUD. Sell.
+    - 31-49: Weak sentiment.
+    - 50: Neutral / Only "Price Predictions".
+    - 51-74: Mild positive buzz.
+    - 75-100: STRONG BUY (Confirmed Catalyst).
+    
+    RESPONSE FORMAT (JSON):
+    {{"score": X, "reason": "Short summary of why"}}
     """
     
-    response_content = ""
     score = 50
+    reason = "Analysis failed"
+    full_response = ""
 
     try:
-        res = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-        response_content = res.choices[0].message.content
-        
-        match = re.search(r'SKOOR:\s*(\d+)', response_content)
-        score = int(match.group(1)) if match else 50
+        res = ai_client.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        full_response = res.choices[0].message.content
+        data = json.loads(full_response)
+        score = int(data.get("score", 50))
+        reason = data.get("reason", "No reason provided")
     except Exception as e:
-        response_content = f"VIGA: {e}"
+        reason = f"Error: {e}"
         score = 50
 
-    print(f"      🤖 AI HINNE (Google News): {score}/100")
-    
-    # SALVESTAME MÄLUFAILI ANALÜÜSIKS
-    log_ai_prompt(symbol, prompt, response_content)
-    
+    print(f"      🤖 AI ANALÜÜS: {score}/100 | {reason}")
+    log_ai_prompt(symbol, prompt, f"SCORE: {score}\nREASON: {reason}\nFULL_JSON: {full_response}")
     return score
 
 # --- 4. HALDUS JA OSTMINE ---
@@ -338,22 +320,16 @@ def manage_existing_positions():
         profit_pct = float(p.unrealized_plpc) * 100
         
         df = get_yahoo_data(symbol, period="5d", interval="1h")
-        
         if df is None:
             if current_price < entry_price * 0.93: 
-                 print(f"   ⚠️ {symbol} PIME STOP! Hind kukkus -7%. Müün.")
                  close_position(symbol, "BLIND_STOP")
             continue
 
         current_rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
-        
         pos_data = get_position_data(symbol)
-        hw = pos_data.get("highest_price", 0)
-        atr = pos_data.get("atr_at_entry", 0)
+        hw = pos_data.get("highest_price", entry_price)
+        atr = pos_data.get("atr_at_entry", current_price * 0.05)
         is_risk_free = pos_data.get("is_risk_free", False)
-        
-        if hw == 0: hw = entry_price
-        if atr == 0: atr = current_price * 0.05 
         
         if current_price > hw:
             update_high_watermark(symbol, current_price, current_rsi)
@@ -369,7 +345,6 @@ def manage_existing_positions():
             hard_stop = entry_price * 0.92
 
         breakeven_price = entry_price * 1.005
-
         if profit_pct >= breakeven_trigger or is_risk_free:
             final_stop = max(breakeven_price, hard_stop)
             if trailing_stop > final_stop: final_stop = trailing_stop
@@ -379,8 +354,7 @@ def manage_existing_positions():
             final_stop = hard_stop
             stop_type = "HARD 🛑"
             
-        dist_to_stop = ((current_price - final_stop) / current_price) * 100
-        print(f"   -> {symbol}: {profit_pct:.2f}% (RSI:{current_rsi:.0f} | Stop: ${final_stop:.2f} | {stop_type} | Puhver: {dist_to_stop:.2f}%)")
+        print(f"   -> {symbol}: {profit_pct:.2f}% (Stop: ${final_stop:.2f} | {stop_type})")
 
         if current_price <= final_stop:
             print(f"      !!! STOP HIT ({stop_type})! Müün {symbol}...")
@@ -390,14 +364,10 @@ def close_position(symbol, reason="UNKNOWN"):
     try:
         pos = trading_client.get_open_position(symbol)
         qty = float(pos.qty)
-        entry_price = float(pos.avg_entry_price)
-        current_price = float(pos.current_price)
-
+        entry = float(pos.avg_entry_price)
+        curr = float(pos.current_price)
         trading_client.close_position(symbol)
-        
-        # Salvestame CSV arhiivi ja JSON lühimällu
-        log_trade_to_csv(symbol, entry_price, current_price, qty, reason)
-        
+        log_trade_to_csv(symbol, entry, curr, qty, reason)
         activate_cooldown(symbol)
         print(f"      TEHTUD! {symbol} müüdud.")
     except Exception as e: 
@@ -407,10 +377,8 @@ def trade(symbol, score, atr):
     try: equity = float(trading_client.get_account().equity)
     except: return
     if equity < 50: return
-    
     size_pct = 0.04 if MARKET_MODE == "BEAR" else 0.07
-    amount = round(equity * size_pct, 2)
-    amount = max(amount, 10)
+    amount = max(round(equity * size_pct, 2), 10)
     
     print(f"5. TEGIJA ({MARKET_MODE}): Ostame {symbol} ${amount:.2f} eest (Skoor {score}).")
     try:
@@ -433,8 +401,7 @@ def run_cycle():
     print(f"2. SKANNER: Laen KÕIK turu varad...")
     try:
         assets = trading_client.get_all_assets(GetAssetsRequest(asset_class=AssetClass.CRYPTO, status=AssetStatus.ACTIVE))
-        ignore = ["USDT/USD", "USDC/USD", "DAI/USD", "WBTC/USD"]
-        tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ignore]
+        tradable = [a.symbol for a in assets if a.tradable and a.symbol.endswith("/USD") and a.symbol not in ["USDT/USD", "USDC/USD", "DAI/USD", "WBTC/USD"]]
         snapshots = data_client.get_crypto_snapshot(CryptoSnapshotRequest(symbol_or_symbols=tradable))
     except: return
 
@@ -451,7 +418,6 @@ def run_cycle():
     best_final_score = -1
     best_atr = 0
     ai_calls_made = 0
-    
     MIN_SCORE_REQ = 75 
     
     print(f"   -> Leidsin {len(candidates)} münti.")
@@ -470,19 +436,15 @@ def run_cycle():
         
         tech_score, hourly_chg, atr, rsi, final_vol = get_technical_analysis(s, alpaca_vol)
         
-        if tech_score == 0:
-             print(f"      ❌ {s} - Andmed puuduvad. SKIP.")
-             continue
-
         if tech_score < 55:
-             print(f"      ❌ Nõrk tehnika ({tech_score}).")
+             print(f"      ❌ Nõrk tehnika ({tech_score}). SKIP.")
              continue
              
         if ai_calls_made >= MAX_AI_CALLS:
             print("   ⚠️ AI limiit täis.")
             break
             
-        print(f"   🔥 LEID: {s} on kuum (Tech: {tech_score}). Küsin AI-lt (Google News)...")
+        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Küsin AI-lt...")
         ai_score = analyze_coin_ai(s)
         ai_calls_made += 1
         
