@@ -6,7 +6,7 @@ import re
 import requests
 import json
 import csv
-import random # UUS: Juhusliku ooteaja jaoks
+import random 
 import xml.etree.ElementTree as ET
 import pandas as pd
 import ta
@@ -20,22 +20,38 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 import trafilatura
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
-# --- 0. SEADISTUS JA FAILID ---
+# --- 0. SEADISTUS JA FAILID (ABSOLUUTSED TEEKONNAD) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 LOG_FILE = os.path.join(BASE_DIR, "bot.log")
 BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
 AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")     
 
+# --- LOGIMISE FUNKTSIOON (PARANDATUD: APPEND) ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    kwargs['flush'] = True
+    # Eemaldame flush argumendi, et see ei segaks faili kirjutamist
+    kwargs.pop('flush', None)
+    
     msg = " ".join(map(str, args))
-    builtins.print(f"[{now}] {msg}", **kwargs)
+    formatted_msg = f"[{now}] {msg}"
+    
+    # 1. Prindi ekraanile (süsteemi logi jaoks)
+    builtins.print(formatted_msg, flush=True, **kwargs)
+    
+    # 2. KIRJUTA LOGIFAILI (Mode 'a' = Append / Lisa lõppu)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(formatted_msg + "\n")
+    except Exception as e:
+        builtins.print(f"[SYSTEM ERROR] Logi salvestamine ebaõnnestus: {e}")
 
+# Laeme .env faili kindlasti õigest kaustast
 load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
@@ -44,7 +60,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v31 (HYBRID STEALTH EDITION) ---")
+print("--- VIBE TRADER: v31.1 (HYBRID STEALTH + LOG FIX) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -57,7 +73,7 @@ ai_client = OpenAI(api_key=openai_key)
 MIN_VOLUME_USD = 10000     
 MAX_AI_CALLS = 10          
 
-# --- 1. MÄLU JA LOGIMINE ---
+# --- 1. MÄLU JA HALDUS ---
 
 def load_brain():
     if os.path.exists(BRAIN_FILE):
@@ -500,7 +516,7 @@ def run_cycle():
             print("   ⚠️ AI limiit täis.")
             break
             
-        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (DuckDuckGo + Deep)...")
+        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (Hybrid)...")
         ai_score = analyze_coin_ai(s)
         ai_calls_made += 1
         
