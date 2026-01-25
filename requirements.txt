@@ -1,5 +1,10 @@
 alpaca-py
-python-dotenv
-yfinance
 openai
+pandas
 ta
+yfinance
+python-dotenv
+streamlit
+newspaper3k
+lxml_html_clean
+requests
