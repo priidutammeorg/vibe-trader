@@ -4,9 +4,9 @@ import os
 import time
 import subprocess
 import json
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from alpaca.trading.client import TradingClient
 
 # --- 1. KONFIGURATSIOON ---
 st.set_page_config(page_title="Vibe Trader", layout="wide", initial_sidebar_state="expanded")
@@ -17,39 +17,49 @@ LOG_FILE = os.path.join(BASE_DIR, "bot.log")
 BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")
 
-# Laeme API võtmed graafiku jaoks
+# Laeme API võtmed
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 
-# --- 3. PÄIS JA GRAAFIK ---
+# --- 3. PÄIS JA GRAAFIK (OTSEPÄRINGUGA) ---
 st.title("🤖 Vibe Trader Dashboard")
 
-# PORTFELLI GRAAFIK (TAGASI TOODUD!)
 if api_key and secret_key:
     try:
-        trade_client = TradingClient(api_key, secret_key, paper=True)
-        # Võtame 1 kuu ajaloo
-        history = trade_client.get_portfolio_history(period="1M", timeframe="1D")
+        # KASUTAME OTSEPÄRINGUT (Requests), et vältida SDK vigu
+        url = "https://paper-api.alpaca.markets/v2/account/portfolio/history"
+        headers = {
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key
+        }
+        params = {"period": "1M", "timeframe": "1D"}
         
-        # Teeme andmed ilusaks graafikuks
-        df = pd.DataFrame({
-            "Equity": history.equity,
-            "Date": [datetime.fromtimestamp(t) for t in history.timestamp]
-        })
-        df.set_index("Date", inplace=True)
+        response = requests.get(url, headers=headers, params=params)
         
-        # Arvutame kasvu
-        start_val = df["Equity"].iloc[0]
-        end_val = df["Equity"].iloc[-1]
-        profit = end_val - start_val
-        color = "green" if profit >= 0 else "red"
-        
-        st.subheader(f"Portfelli Väärtus: ${end_val:,.2f} (:{color}[${profit:,.2f}])")
-        st.line_chart(df["Equity"], height=250)
-        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Töötleme andmed graafiku jaoks
+            df = pd.DataFrame({
+                "Equity": data["equity"],
+                "Date": [datetime.fromtimestamp(t) for t in data["timestamp"]]
+            })
+            df.set_index("Date", inplace=True)
+            
+            # Arvutame kasvu
+            start_val = df["Equity"].iloc[0]
+            end_val = df["Equity"].iloc[-1]
+            profit = end_val - start_val
+            color = "green" if profit >= 0 else "red"
+            
+            st.subheader(f"Portfelli Väärtus: ${end_val:,.2f} (:{color}[${profit:,.2f}])")
+            st.line_chart(df["Equity"], height=250)
+        else:
+            st.warning(f"Ei saanud graafikut laadida. Alpaca vastus: {response.text}")
+            
     except Exception as e:
-        st.warning(f"Graafikut ei saanud laadida: {e}")
+        st.warning(f"Graafiku viga: {e}")
 
 st.markdown("---")
 
@@ -70,7 +80,7 @@ with st.sidebar:
         st.rerun()
         
     st.divider()
-    st.caption("v31.5 Fixed Edition")
+    st.caption("v32.1 Graph Fix")
 
 # --- 5. LOGID JA INFO ---
 col1, col2 = st.columns([1.5, 1])
@@ -81,8 +91,8 @@ with col1:
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            # Näitame viimast 100 rida
-            st.code("".join(lines[-100:]), language="log")
+            # Näitame viimast 200 rida
+            st.code("".join(lines[-200:]), language="log")
     else:
         st.warning("Logifail puudub.")
 
@@ -92,13 +102,12 @@ with col2:
     if os.path.exists(AI_LOG_FILE):
         with open(AI_LOG_FILE, "r", encoding="utf-8") as f:
             ai_lines = f.readlines()
-            st.text_area("AI History", "".join(ai_lines[-100:]), height=300, label_visibility="collapsed")
+            st.text_area("AI History", "".join(ai_lines[-200:]), height=400, label_visibility="collapsed")
     else:
         st.info("AI ajalugu puudub.")
 
     st.divider()
     
-    # PEIDETUD MÄLU (Et ei risustaks pilti)
     with st.expander("🧠 Vaata Tehnilist Mälu (JSON)"):
         if os.path.exists(BRAIN_FILE):
             try:
