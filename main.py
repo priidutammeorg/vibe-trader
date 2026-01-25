@@ -6,6 +6,8 @@ import re
 import requests
 import json
 import csv
+import random # UUS: Juhusliku ooteaja jaoks
+import xml.etree.ElementTree as ET
 import pandas as pd
 import ta
 import yfinance as yf
@@ -18,7 +20,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
 import trafilatura
-from duckduckgo_search import DDGS # UUS: Otseühendus uudistega
+from duckduckgo_search import DDGS
 
 # --- 0. SEADISTUS JA FAILID ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +44,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v30 (DUCKDUCKGO EDITION) ---")
+print("--- VIBE TRADER: v31 (HYBRID STEALTH EDITION) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -227,7 +229,7 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (DUCKDUCKGO + TRAFILATURA) ---
+# --- 3. AI & UUDISED (HYBRID ENGINE) ---
 
 def scrape_with_trafilatura(url):
     try:
@@ -238,40 +240,67 @@ def scrape_with_trafilatura(url):
     except: pass
     return None
 
-def get_news_ddg(symbol):
+def get_backup_news_rss(symbol):
     """
-    Kasutab DuckDuckGo-d, et saada OTSELINGE uudistele (väldib Google'i redirecte).
+    VARUPLAAN: Kui DuckDuckGo viskab 202 errori, kasutame vana head Google RSS-i.
     """
     try:
+        print("      ⚠️ DDG Ratelimit! Lülitun ümber Google RSS varuplaanile...")
+        clean_ticker = symbol.split("/")[0] 
+        url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
+        res = requests.get(url, timeout=5)
+        
+        full_report = []
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')[:3]
+            for item in items:
+                title = item.find('title').text
+                pub_date = item.find('pubDate').text
+                # Google RSS puhul me sisu hästi kätte ei saa (cookie wall), aga pealkiri on parem kui mitte midagi!
+                full_report.append(f"--- BACKUP SOURCE (Title Only) ---\nTITLE: {title}\nDATE: {pub_date}\n")
+            return "\n".join(full_report)
+        return "Backup news failed."
+    except Exception as e:
+        return f"Backup error: {e}"
+
+def get_news_ddg(symbol):
+    try:
+        # TEE PAUS! See hoiab meid "limit" alt väljas.
+        sleep_time = random.uniform(6, 12)
+        print(f"      ⏳ Ootan {sleep_time:.1f}s, et mitte saada blokki...")
+        time.sleep(sleep_time)
+
         clean_ticker = symbol.split("/")[0]
         keywords = f"{clean_ticker} crypto news"
         
-        # DDG annab otseviited (nt coindesk.com, mitte news.google.com/...)
-        results = DDGS().news(keywords=keywords, region="wt-wt", safesearch="off", max_results=4)
+        # Kasutame DDGS
+        results = DDGS().news(keywords=keywords, region="wt-wt", safesearch="off", max_results=3)
         
         full_report = []
         
+        # Kui DDG ei leia midagi või viskab vea, on tulemus tühi
         if not results:
-            return "No news found via DuckDuckGo."
+             return get_backup_news_rss(symbol)
 
         for item in results:
             title = item.get('title', 'No Title')
             link = item.get('url', '')
             date = item.get('date', 'Today')
             
-            # Loeme sisu otseallikast
             content = scrape_with_trafilatura(link)
             
             if content:
                 full_report.append(f"--- ARTICLE ---\nTITLE: {title}\nDATE: {date}\nLINK: {link}\nCONTENT:\n{content}\n")
             else:
-                # Kui lugemine ebaõnnestus, kasutame DDG enda lühikest kokkuvõtet (body)
                 snippet = item.get('body', '')
-                full_report.append(f"--- ARTICLE (Snippet Only) ---\nTITLE: {title}\nDATE: {date}\nCONTENT:\n{snippet}\n")
+                full_report.append(f"--- ARTICLE (Snippet) ---\nTITLE: {title}\nDATE: {date}\nCONTENT:\n{snippet}\n")
                 
         return "\n".join(full_report)
+
     except Exception as e:
-        return f"Error searching news: {e}"
+        # PÜÜAME DDG VEA KINNI ja käivitame varuplaani
+        return get_backup_news_rss(symbol)
 
 def analyze_coin_ai(symbol):
     news_text = get_news_ddg(symbol)
@@ -288,7 +317,7 @@ def analyze_coin_ai(symbol):
     {news_text}
     
     === INSTRUCTIONS ===
-    1. READ content carefully. These are direct articles.
+    1. READ content carefully.
     2. FILTER NOISE: Ignore "Price Prediction 2030" or SEO spam. Score them 50.
     3. DETECT CATALYSTS:
        - BULLISH (80-100): ETF Approval, Major Partnership, Court Victory.
