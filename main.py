@@ -30,7 +30,7 @@ BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
 AI_LOG_FILE = os.path.join(BASE_DIR, "ai_history.log")     
 
-# --- LOGIMISE FUNKTSIOON (SMART LOGGER: NO ECHO) ---
+# --- LOGIMISE FUNKTSIOON (SMART LOGGER) ---
 def print(*args, **kwargs):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     kwargs.pop('flush', None)
@@ -38,15 +38,14 @@ def print(*args, **kwargs):
     msg = " ".join(map(str, args))
     formatted_msg = f"[{now}] {msg}"
     
-    # 1. KIRJUTA LOGIFAILI (See on peamine mälu)
+    # 1. LOGIFAILI (ALATI)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(formatted_msg + "\n")
     except Exception as e:
         builtins.print(f"[SYSTEM ERROR] Logi viga: {e}")
 
-    # 2. PRINDI EKRAANILET AINULT SIIS, KUI ON INIMENE (TERMINAL)
-    # See väldib topelt-logimist Crontabis
+    # 2. EKRAANILE (AINULT TERMINALIS)
     if sys.stdout.isatty():
         builtins.print(formatted_msg, flush=True, **kwargs)
 
@@ -57,13 +56,11 @@ secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key or not secret_key or not openai_key:
-    # Siin kasutame builtins.print otse, sest logi pole veel laetud
     builtins.print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-# Kasutame builtins.print siin sunniviisiliselt, et näeksid versiooni käivitamisel
-if sys.stdout.isatty():
-    builtins.print(f"--- VIBE TRADER: v31.2 (SMART LOGGER FIX) ---")
+# --- FIX: KUVAME VERSIOONI ALATI (KA CRONTABIS) ---
+print("--- VIBE TRADER: v31.3 (LOGGING RESTORED) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
