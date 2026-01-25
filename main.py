@@ -6,7 +6,6 @@ import re
 import requests
 import json
 import csv
-import xml.etree.ElementTree as ET
 import pandas as pd
 import ta
 import yfinance as yf
@@ -18,12 +17,11 @@ from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoSnapshotRequest
 from openai import OpenAI
-import trafilatura 
+import trafilatura
+from duckduckgo_search import DDGS # UUS: Otseühendus uudistega
 
-# --- 0. SEADISTUS JA FAILID (FIX: ABSOLUUTSED TEEKONNAD) ---
-# See rida leiab üles, kus main.py tegelikult asub (/root/vibe-trader)
+# --- 0. SEADISTUS JA FAILID ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 LOG_FILE = os.path.join(BASE_DIR, "bot.log")
 BRAIN_FILE = os.path.join(BASE_DIR, "brain.json")
 ARCHIVE_FILE = os.path.join(BASE_DIR, "trade_archive.csv") 
@@ -35,9 +33,7 @@ def print(*args, **kwargs):
     msg = " ".join(map(str, args))
     builtins.print(f"[{now}] {msg}", **kwargs)
 
-# Laeme .env faili kindlasti õigest kaustast
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-
 api_key = os.getenv("ALPACA_API_KEY")
 secret_key = os.getenv("ALPACA_SECRET_KEY")
 openai_key = os.getenv("OPENAI_API_KEY")
@@ -46,7 +42,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v29.1 (ABSOLUTE PATHS FIX) ---")
+print("--- VIBE TRADER: v30 (DUCKDUCKGO EDITION) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -96,7 +92,6 @@ def log_trade_to_csv(symbol, entry_price, exit_price, qty, reason):
 def log_ai_prompt(symbol, prompt_text, response_text):
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Nüüd kirjutame kindlasti õigesse kohta (BASE_DIR)
         with open(AI_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] 🧠 ANALÜÜS: {symbol}\n")
             f.write("👇 --- INPUT (PROMPT & ARTICLES) ---\n")
@@ -232,66 +227,54 @@ def get_technical_analysis(symbol, alpaca_volume_usd):
     
     return max(0, min(100, score)), hourly_change, atr, rsi, final_vol_usd
 
-# --- 3. AI & UUDISED (TRAFILATURA SCRAPING) ---
+# --- 3. AI & UUDISED (DUCKDUCKGO + TRAFILATURA) ---
 
 def scrape_with_trafilatura(url):
-    """
-    Kasutab trafilatura teeki, mis on palju targem küpsiste/reklaamide eemaldamisel.
-    """
     try:
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
             text = trafilatura.extract(downloaded)
-            if text:
-                # Kontroll: kas tekst on Google'i küpsise hoiatus?
-                if "Non-personalized content" in text or "Before you continue to Google" in text:
-                    return None # See on rämps, proovime teist uudist
-                return text[:2500] # Tagastame esimesed 2500 märki
+            return text[:3000] if text else None
     except: pass
     return None
 
-def get_google_news_deep(symbol):
+def get_news_ddg(symbol):
+    """
+    Kasutab DuckDuckGo-d, et saada OTSELINGE uudistele (väldib Google'i redirecte).
+    """
     try:
-        clean_ticker = symbol.split("/")[0] 
-        # Kasutame siin teist RSS URLi struktuuri, mis vahel annab paremaid linke
-        url = f"https://news.google.com/rss/search?q={clean_ticker}+crypto+when:1d&hl=en-US&gl=US&ceid=US:en"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        res = requests.get(url, headers=headers, timeout=5)
+        clean_ticker = symbol.split("/")[0]
+        keywords = f"{clean_ticker} crypto news"
+        
+        # DDG annab otseviited (nt coindesk.com, mitte news.google.com/...)
+        results = DDGS().news(keywords=keywords, region="wt-wt", safesearch="off", max_results=4)
         
         full_report = []
-        valid_articles_count = 0
         
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            items = root.findall('.//item')
-            
-            # Proovime läbi kuni 6 artiklit, aga lõpetame kui saame 2 head kätte
-            for item in items:
-                if valid_articles_count >= 2: break
-                
-                title = item.find('title').text
-                link = item.find('link').text
-                pub_date = item.find('pubDate').text
-                
-                # LAE ARTIKKEL TRAFILATURAGA
-                content = scrape_with_trafilatura(link)
-                
-                if content:
-                    full_report.append(f"--- ARTICLE ---\nTITLE: {title}\nDATE: {pub_date}\nCONTENT:\n{content}\n")
-                    valid_articles_count += 1
-                else:
-                    # Kui sisu ei saanud kätte (või oli küpsise rämps), siis lisame vähemalt pealkirja
-                    full_report.append(f"--- ARTICLE (Headline Only) ---\nTITLE: {title}\nDATE: {pub_date}\n(Content blocked by cookie wall)\n")
+        if not results:
+            return "No news found via DuckDuckGo."
 
-            return "\n".join(full_report) if full_report else "No accessible news found."
-        return "News fetch error."
+        for item in results:
+            title = item.get('title', 'No Title')
+            link = item.get('url', '')
+            date = item.get('date', 'Today')
+            
+            # Loeme sisu otseallikast
+            content = scrape_with_trafilatura(link)
+            
+            if content:
+                full_report.append(f"--- ARTICLE ---\nTITLE: {title}\nDATE: {date}\nLINK: {link}\nCONTENT:\n{content}\n")
+            else:
+                # Kui lugemine ebaõnnestus, kasutame DDG enda lühikest kokkuvõtet (body)
+                snippet = item.get('body', '')
+                full_report.append(f"--- ARTICLE (Snippet Only) ---\nTITLE: {title}\nDATE: {date}\nCONTENT:\n{snippet}\n")
+                
+        return "\n".join(full_report)
     except Exception as e:
-        return f"Error fetching news: {e}"
+        return f"Error searching news: {e}"
 
 def analyze_coin_ai(symbol):
-    news_text = get_google_news_deep(symbol)
+    news_text = get_news_ddg(symbol)
     
     market_context = "BEAR MARKET (Trend is DOWN). Use EXTREME CAUTION." if MARKET_MODE == "BEAR" else "BULL MARKET. Look for MOMENTUM."
 
@@ -305,7 +288,7 @@ def analyze_coin_ai(symbol):
     {news_text}
     
     === INSTRUCTIONS ===
-    1. If content says "Content blocked" or is generic, rely on the TITLE but reduce confidence score.
+    1. READ content carefully. These are direct articles.
     2. FILTER NOISE: Ignore "Price Prediction 2030" or SEO spam. Score them 50.
     3. DETECT CATALYSTS:
        - BULLISH (80-100): ETF Approval, Major Partnership, Court Victory.
@@ -488,7 +471,7 @@ def run_cycle():
             print("   ⚠️ AI limiit täis.")
             break
             
-        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (Trafilatura)...")
+        print(f"   🔥 LEID: {s} (Tech: {tech_score}). Skreipin uudiseid (DuckDuckGo + Deep)...")
         ai_score = analyze_coin_ai(s)
         ai_calls_made += 1
         
