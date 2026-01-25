@@ -40,7 +40,7 @@ if not api_key or not secret_key or not openai_key:
     print("VIGA: .env failist on võtmed puudu!")
     exit()
 
-print("--- VIBE TRADER: v26.1 (LOOP FIX) ---")
+print("--- VIBE TRADER: v27 (CRONTAB EDITION) ---")
 
 # --- GLOBAL VARIABLES ---
 MARKET_MODE = "NEUTRAL" 
@@ -391,7 +391,7 @@ def trade(symbol, score, atr):
         print(f"   -> Viga ostul: {e}")
 
 def run_cycle():
-    print(f"========== TSÜKKEL START ==========") 
+    print(f"========== TSÜKKEL START (CRON) ==========") 
     determine_market_mode()
     manage_existing_positions()
     
@@ -462,15 +462,11 @@ def run_cycle():
     else:
         print(f"--- TULEMUS: Parim {best_coin['symbol'] if best_coin else '-'} ei ületanud lävendit ({MIN_SCORE_REQ}).")
     
-    print(f"========== TSÜKKEL LÕPP ==========")
+    print(f"========== TSÜKKEL LÕPP (CRON) ==========")
 
-# --- LÕPMATU TSÜKKEL ---
+# --- KÄIVITUS (CRONTAB REŽIIM) ---
 if __name__ == "__main__":
-    while True:
-        try:
-            run_cycle()
-        except Exception as e:
-            print(f"CRITICAL ERROR: {e}")
-        
-        print("💤 Ootan 15 minutit järgmise tsüklini...")
-        time.sleep(900) # 15 minutit pausi
+    try:
+        run_cycle()
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
